@@ -1,0 +1,10 @@
+# Never commit anything that could carry a token or user config copies
+*.token
+*.secret
+config-copy/
+tests/fixtures/*.live.json
+_work/scratch/
+__pycache__/
+*.pyc
+.DS_Store
+.omc/

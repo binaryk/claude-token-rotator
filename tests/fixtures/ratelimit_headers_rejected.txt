@@ -1,0 +1,12 @@
+HTTP/2 429 
+date: Tue, 15 Sep 2026 14:05:00 GMT
+content-type: application/json
+anthropic-ratelimit-unified-5h-status: rejected
+anthropic-ratelimit-unified-representative-claim: five_hour
+anthropic-ratelimit-unified-reset: 1789488000
+anthropic-ratelimit-unified-5h-utilization: 1.0
+anthropic-ratelimit-unified-7d-reset: 1790053200
+anthropic-ratelimit-unified-5h-reset: 1789488000
+anthropic-ratelimit-unified-7d-status: allowed
+anthropic-ratelimit-unified-7d-utilization: 0.42
+anthropic-ratelimit-unified-status: rejected

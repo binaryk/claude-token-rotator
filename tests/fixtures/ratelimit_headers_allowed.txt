@@ -1,0 +1,16 @@
+HTTP/2 200 
+date: Tue, 15 Sep 2026 12:59:25 GMT
+content-type: application/json
+anthropic-ratelimit-unified-5h-status: allowed
+anthropic-ratelimit-unified-representative-claim: five_hour
+anthropic-ratelimit-unified-overage-disabled-reason: out_of_credits
+anthropic-ratelimit-unified-overage-status: rejected
+anthropic-ratelimit-unified-reset: 1789483200
+anthropic-ratelimit-unified-5h-utilization: 0.51
+anthropic-ratelimit-unified-7d-reset: 1790053200
+anthropic-ratelimit-unified-5h-reset: 1789483200
+anthropic-ratelimit-unified-7d-status: allowed
+anthropic-ratelimit-unified-fallback-percentage: 0.5
+anthropic-ratelimit-unified-fallback: available
+anthropic-ratelimit-unified-7d-utilization: 0.18
+anthropic-ratelimit-unified-status: allowed
