@@ -50,6 +50,7 @@ import time
 from typing import Dict, List, Optional, Tuple
 
 from ctr.model import (
+    FAILURE_TRANSPORT,
     NO_TOKEN_ERROR,
     PROBE_OAUTH_USAGE,
     PROBE_RATELIMIT_HEADERS,
@@ -92,9 +93,16 @@ CLAMP_NOTE = "utilisation was outside 0..100 and was clamped — reading is susp
 _HTTP_MARKER = "__CTR_HTTP__"
 _STRATEGIES = (PROBE_OAUTH_USAGE, PROBE_RATELIMIT_HEADERS)
 #: classify_http outcomes that make it worth trying the other strategy.
+#: `_request` answered with no HTTP status at all — DNS, connect, TLS or a
+#: timeout. It says nothing about the token (v1.1); see model.FAILURE_TRANSPORT.
+OUTCOME_TRANSPORT = "transport"
+
 _FALLBACK_FROM = {
-    PROBE_OAUTH_USAGE: ("scope_insufficient",),
-    PROBE_RATELIMIT_HEADERS: ("no_headers", "http_error"),
+    # A transport error on one endpoint may still succeed on the other (a
+    # single connection reset, a half-open socket), so it is worth the second
+    # attempt — the fleet-moving decision is what must ignore it, not the probe.
+    PROBE_OAUTH_USAGE: ("scope_insufficient", OUTCOME_TRANSPORT),
+    PROBE_RATELIMIT_HEADERS: ("no_headers", "http_error", OUTCOME_TRANSPORT),
 }
 _ERROR_TEXT = {
     "scope_insufficient": "token lacks the user:profile scope for /api/oauth/usage",
@@ -112,10 +120,11 @@ _ERROR_TEXT = {
 #: failure. Ties keep the later attempt, matching the old last-wins behaviour.
 _OUTCOME_RANK = {
     "scope_insufficient": 0,
-    "rate_limited": 1,
-    "no_headers": 2,
-    "http_error": 3,
-    "auth_failed": 4,
+    OUTCOME_TRANSPORT: 1,
+    "rate_limited": 2,
+    "no_headers": 3,
+    "http_error": 4,
+    "auth_failed": 5,
 }
 _UNKNOWN_RANK = _OUTCOME_RANK["http_error"]
 
@@ -442,7 +451,10 @@ def _probe_oauth(label: str, token: str, timeout_s: int, now: int) -> Tuple[Usag
         want_headers=False,
     )
     if error:
-        return Usage.failed(label, error, now), "http_error"
+        return (
+            Usage.failed(label, error, now, kind=FAILURE_TRANSPORT),
+            OUTCOME_TRANSPORT,
+        )
     outcome = classify_http(status, body)
     if outcome != "ok":
         return Usage.failed(label, _describe(outcome, status), now), outcome
@@ -471,7 +483,10 @@ def _probe_headers(label: str, token: str, timeout_s: int, now: int) -> Tuple[Us
         want_headers=True,
     )
     if error:
-        return Usage.failed(label, error, now), "http_error"
+        return (
+            Usage.failed(label, error, now, kind=FAILURE_TRANSPORT),
+            OUTCOME_TRANSPORT,
+        )
     parsed = parse_ratelimit_headers(label, headers, now)
     if parsed.ok:
         # Headers are authoritative even on a 429: they say `rejected`.

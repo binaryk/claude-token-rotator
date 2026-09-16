@@ -451,3 +451,86 @@ class TestKeychain(KeychainTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CachePutClearsTheFailureCounterTests(StoreTestCase):
+    """v1.1 item 2 — a success resets the count whichever command probed.
+
+    `ctr status` at 09:38 on 2026-09-16 probed fine and cached the reading,
+    but `probe_failures.social` stayed at 2 because only a monitor tick ever
+    called `record_probe_results`. Every command's success path goes through
+    `cache_put`, so the reset belongs there.
+    """
+
+    def _reading(self, label="social", ok=True):
+        return Usage(
+            label=label, five_h=4.0, seven_d=45.0, five_h_reset=0, seven_d_reset=0,
+            status="allowed", probe=PROBE_RATELIMIT_HEADERS, ok=ok, error="",
+            checked_at=1789540730,
+        )
+
+    def test_a_successful_reading_clears_the_counter(self):
+        state = self.store.state()
+        state["probe_failures"] = {"social": 2}
+        state["probe_failed_at"] = {"social": 1789500000}
+        self.store.save_state(state)
+
+        self.store.cache_put(self._reading())
+
+        after = self.store.state()
+        self.assertEqual(0, after["probe_failures"]["social"])
+        self.assertEqual({}, after.get("probe_failed_at", {}))
+
+    def test_it_leaves_other_labels_alone(self):
+        state = self.store.state()
+        state["probe_failures"] = {"social": 2, "spare": 1}
+        self.store.save_state(state)
+        self.store.cache_put(self._reading("social"))
+        after = self.store.state()
+        self.assertEqual(0, after["probe_failures"]["social"])
+        self.assertEqual(1, after["probe_failures"]["spare"])
+
+    def test_the_cached_reading_is_still_written(self):
+        self.store.cache_put(self._reading())
+        cached = self.store.state()["cache"]["social"]
+        self.assertEqual(4.0, cached["five_h"])
+
+    def test_a_state_with_no_counters_is_fine(self):
+        self.store.cache_put(self._reading())  # must not raise
+        self.assertEqual(0, self.store.state().get("probe_failures", {}).get("social", 0))
+
+
+class CacheHitIsNotAProbeTests(StoreTestCase):
+    """A cache HIT must not reset the counter — only a real probe does.
+
+    Found by running the installed command: `ctr status` inside the 60 s cache
+    TTL served the cached reading, never called `cache_put`, and left the
+    counter alone. That is correct (no probe, no new evidence) but it is a real
+    distinction, so it is pinned here. The brief's live case — a `ctr status`
+    after a 7.5 h sleep — has a stale cache, really probes, and does reset;
+    `--fresh` forces a probe at any time.
+    """
+
+    def test_a_cache_hit_leaves_the_counter_alone(self):
+        reading = Usage(
+            label="social", five_h=4.0, seven_d=45.0, five_h_reset=0, seven_d_reset=0,
+            status="allowed", probe=PROBE_RATELIMIT_HEADERS, ok=True, error="",
+            checked_at=1000,
+        )
+        self.store.cache_put(reading)
+        state = self.store.state()
+        state["probe_failures"] = {"social": 1}
+        self.store.save_state(state)
+
+        hit = self.store.cache_get("social", ttl_s=60, now=1030)
+        self.assertIsNotNone(hit, "still inside the TTL")
+        self.assertEqual(1, self.store.state()["probe_failures"]["social"])
+
+    def test_an_expired_entry_is_a_miss(self):
+        reading = Usage(
+            label="social", five_h=4.0, seven_d=45.0, five_h_reset=0, seven_d_reset=0,
+            status="allowed", probe=PROBE_RATELIMIT_HEADERS, ok=True, error="",
+            checked_at=1000,
+        )
+        self.store.cache_put(reading)
+        self.assertIsNone(self.store.cache_get("social", ttl_s=60, now=1100))

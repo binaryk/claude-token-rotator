@@ -25,7 +25,7 @@ with `record_probe_results()` BEFORE calling `decide()`.
 
 from typing import Dict, Iterable, List, Optional
 
-from ctr.model import DEFAULTS, NO_TOKEN_ERROR, Decision, Usage
+from ctr.model import DEFAULTS, FAILURE_TRANSPORT, NO_TOKEN_ERROR, Decision, Usage
 
 #: A token at or above this utilisation has no headroom left and can never be
 #: a switch target, however low every other token is.
@@ -47,6 +47,23 @@ PROBE_FAILURES_KEY = "probe_failures"
 #: A MEASURED `status == "rejected"` is different: that is the API stating the
 #: token is exhausted, so it still triggers immediately (see `_evaluate_trigger`).
 MIN_CONSECUTIVE_FAILURES = 2
+
+#: state.json key: label -> unix time of the failure that last incremented the
+#: counter above.
+LAST_FAILURE_KEY = "probe_failed_at"
+
+#: "Consecutive" has to mean consecutive IN TIME as well as in ticks.
+#:
+#: Measured 2026-09-16: the two failures that drove `probe_failures.social` to 2
+#: were 01:26 and 09:00 — SEVEN AND A HALF HOURS apart, because the Mac was
+#: asleep in between and the monitor simply did not run. Calling those two ticks
+#: "consecutive" is meaningless: nothing was observed in the gap, and the second
+#: failure is evidence about a freshly-woken network, not about a pattern.
+#:
+#: Three monitor intervals at the 300 s default. Long enough that a couple of
+#: genuinely back-to-back failures still accumulate (they are 300 s apart),
+#: short enough that a sleep, a lid close or a commute restarts the count.
+FAILURE_GAP_RESET_S = 900
 
 #: Never let a probe error string grow a log line without bound.
 _MAX_REASON_DETAIL = 120
@@ -102,6 +119,8 @@ def _copy_state(state: Optional[Dict]) -> Dict:
     new["parked"] = fresh
     failures = new.get(PROBE_FAILURES_KEY)
     new[PROBE_FAILURES_KEY] = dict(failures) if isinstance(failures, dict) else {}
+    stamps = new.get(LAST_FAILURE_KEY)
+    new[LAST_FAILURE_KEY] = dict(stamps) if isinstance(stamps, dict) else {}
     return new
 
 
@@ -201,26 +220,48 @@ def consecutive_failures(state: Optional[Dict], label: str) -> int:
     return max(0, _as_int(counters.get(label), 0))
 
 
-def record_probe_results(state: Optional[Dict], usages: Optional[List[Usage]]) -> Dict:
+def record_probe_results(
+    state: Optional[Dict],
+    usages: Optional[List[Usage]],
+    now: Optional[int] = None,
+) -> Dict:
     """Return a NEW state dict with the failure counters folded in.
 
-    One entry per label seen in `usages`: +1 for a failed probe, reset to 0 for
-    a successful one (including a successful probe that reports `rejected` —
-    that is a measurement, not a failure). Labels absent from `usages` keep
-    whatever count they had, so a token that is not probed this tick neither
-    accumulates nor forgets.
+    Per label seen in `usages`:
+
+    * a SUCCESS resets the count to 0 and forgets the timestamp (including a
+      success that reports `rejected` — that is a measurement, not a failure);
+    * a TRANSPORT failure changes nothing at all. curl never got an HTTP status,
+      so the API said nothing about this token and there is no evidence to
+      record. It neither accumulates nor clears an existing count (v1.1);
+    * any other failure increments, unless more than `FAILURE_GAP_RESET_S`
+      passed since the last one, in which case the count restarts at 1.
+
+    Labels absent from `usages` keep whatever they had, so a token that is not
+    probed this tick neither accumulates nor forgets.
 
     Call this BEFORE `decide()` so the count includes the current tick.
     """
     new = _copy_state(state)
     counters = new[PROBE_FAILURES_KEY]
+    stamps = new[LAST_FAILURE_KEY]
+    moment = _as_int(now, 0)
     for usage in usages or []:
         if usage is None or not usage.label:
             continue
+        label = usage.label
         if usage.ok:
-            counters[usage.label] = 0
-        else:
-            counters[usage.label] = max(0, _as_int(counters.get(usage.label), 0)) + 1
+            counters[label] = 0
+            stamps.pop(label, None)
+            continue
+        if usage.failure_kind == FAILURE_TRANSPORT:
+            continue  # not evidence about the token; see model.FAILURE_TRANSPORT
+        previous = max(0, _as_int(counters.get(label), 0))
+        last_at = _as_int(stamps.get(label), 0)
+        stale = bool(moment and last_at and (moment - last_at) > FAILURE_GAP_RESET_S)
+        counters[label] = 1 if (stale or previous <= 0) else previous + 1
+        if moment:
+            stamps[label] = moment
     return new
 
 
@@ -359,6 +400,18 @@ def _evaluate_trigger(
         return True, "no usage reading for active '%s'" % active, ""
     if not usage.ok and usage.error == NO_TOKEN_ERROR:
         return True, "active '%s' has no token in the keychain" % active, ""
+    if not usage.ok and usage.failure_kind == FAILURE_TRANSPORT:
+        # We never reached the API, so we learned nothing about this token and
+        # have no reason to move off it. Switching here would abandon a healthy
+        # token, park it for a full cooldown, and land on a token the same dead
+        # network would fail identically. `triggered` stays True only so
+        # monitor.py writes the one log line; it never reaches notify() or a
+        # switch. (v1.1, measured 2026-09-16.)
+        return (
+            False,
+            "network: active '%s' unreachable, holding: %s" % (active, _short(usage.error)),
+            "",
+        )
     if not usage.ok:
         # max(1, ...) keeps the message honest even if a caller forgot to fold
         # this tick in: the probe in hand failed, so at least one has.

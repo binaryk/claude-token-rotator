@@ -216,7 +216,7 @@ def _tick_inner(store, now: int, apply: bool, auto_rollover: bool) -> Dict:
     # Fold this tick's probe results into the consecutive-failure counters
     # BEFORE deciding: decide() reads them to de-bounce a failed probe, and
     # they are persisted by the save_state below.
-    state = selector.record_probe_results(state, usages)
+    state = selector.record_probe_results(state, usages, now)
     decision = selector.decide(active, usages, state, config, now)
 
     switched = False

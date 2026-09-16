@@ -8,6 +8,7 @@ Run: PYTHONPATH=src python3 -m unittest tests.test_usage -v
 """
 
 import glob
+import json
 import os
 import sys
 import tempfile
@@ -17,9 +18,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 
 from ctr import usage  # noqa: E402
 from ctr.model import (  # noqa: E402
+    FAILURE_HTTP,
+    FAILURE_TRANSPORT,
     NO_TOKEN_ERROR,
     PROBE_OAUTH_USAGE,
     PROBE_RATELIMIT_HEADERS,
+    Usage,
 )
 
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
@@ -624,3 +628,93 @@ class TestProbeAll(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFailureClassification(ProbeTestCase):
+    """v1.1 — did the API answer about this token, or did we never reach it?
+
+    curl exiting with no HTTP status (6 could-not-resolve, 28 timeout, 7, 35,
+    52, 56, and our synthetic 124) tells us nothing about the token. An HTTP
+    status does.
+    """
+
+    def test_could_not_resolve_host_is_transport(self):
+        self.install(
+            Response(0, "", rc=6, stderr="curl: (6) Could not resolve host: api.anthropic.com"),
+            Response(0, "", rc=6, stderr="curl: (6) Could not resolve host: api.anthropic.com"),
+        )
+        result = usage.probe("social", FAKE_TOKEN)
+        self.assertFalse(result.ok)
+        self.assertEqual(FAILURE_TRANSPORT, result.failure_kind)
+
+    def test_a_resolve_timeout_is_transport(self):
+        self.install(
+            Response(0, "", rc=28, stderr="curl: (28) Resolving timed out after 5305244 milliseconds"),
+            Response(0, "", rc=28, stderr="curl: (28) Resolving timed out after 5305244 milliseconds"),
+        )
+        result = usage.probe("social", FAKE_TOKEN)
+        self.assertEqual(FAILURE_TRANSPORT, result.failure_kind)
+        self.assertIn("28", result.error)
+
+    def test_our_own_timeout_kill_is_transport(self):
+        self.install(
+            Response(0, "", rc=124, stderr="curl timed out after 20s"),
+            Response(0, "", rc=124, stderr="curl timed out after 20s"),
+        )
+        self.assertEqual(FAILURE_TRANSPORT, usage.probe("social", FAKE_TOKEN).failure_kind)
+
+    def test_a_401_is_an_http_failure(self):
+        body = fixture("oauth_usage_401.json")
+        self.install(Response(401, body), Response(401, body))
+        result = usage.probe("social", FAKE_TOKEN)
+        self.assertFalse(result.ok)
+        self.assertEqual(FAILURE_HTTP, result.failure_kind)
+
+    def test_an_authenticated_429_is_an_http_failure(self):
+        body = fixture("oauth_usage_429.json")
+        self.install(Response(429, body), Response(429, body))
+        self.assertEqual(FAILURE_HTTP, usage.probe("social", FAKE_TOKEN).failure_kind)
+
+    def test_a_500_is_an_http_failure(self):
+        self.install(Response(500, "{}"), Response(500, "{}"))
+        self.assertEqual(FAILURE_HTTP, usage.probe("social", FAKE_TOKEN).failure_kind)
+
+    def test_a_successful_probe_has_no_failure_kind(self):
+        self.install(Response(200, fixture("oauth_usage_200.json")))
+        result = usage.probe("social", FAKE_TOKEN)
+        self.assertTrue(result.ok)
+        self.assertEqual("", result.failure_kind)
+
+    def test_a_missing_token_is_not_a_transport_failure(self):
+        """Nothing was sent, but a second tick cannot learn more either."""
+        result = usage.probe("social", "")
+        self.assertFalse(result.ok)
+        self.assertNotEqual(FAILURE_TRANSPORT, result.failure_kind)
+
+    def test_transport_on_the_first_attempt_and_http_on_the_second(self):
+        """The kind must describe the attempt the error text actually names."""
+        self.install(
+            Response(0, "", rc=6, stderr="curl: (6) Could not resolve host"),
+            Response(401, fixture("oauth_usage_401.json")),
+        )
+        result = usage.probe("social", FAKE_TOKEN)
+        self.assertFalse(result.ok)
+        self.assertEqual(FAILURE_HTTP, result.failure_kind,
+                         "an HTTP answer arrived, so the token WAS reached")
+
+    def test_failure_kind_survives_a_json_round_trip(self):
+        self.install(
+            Response(0, "", rc=6, stderr="curl: (6) Could not resolve host"),
+            Response(0, "", rc=6, stderr="curl: (6) Could not resolve host"),
+        )
+        result = usage.probe("social", FAKE_TOKEN)
+        reloaded = Usage.from_json(json.loads(json.dumps(result.to_json())))
+        self.assertEqual(FAILURE_TRANSPORT, reloaded.failure_kind)
+
+    def test_an_old_cached_reading_without_the_field_still_loads(self):
+        data = {
+            "label": "social", "five_h": 4.0, "seven_d": 45.0, "five_h_reset": 0,
+            "seven_d_reset": 0, "status": "allowed", "probe": "ratelimit_headers",
+            "ok": True, "error": "", "checked_at": 1789540730,
+        }
+        self.assertEqual("", Usage.from_json(data).failure_kind)

@@ -22,7 +22,14 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
 from ctr import launchd, monitor, notify, selector  # noqa: E402
-from ctr.model import Decision, TokenRecord, Usage, merged_config  # noqa: E402
+from ctr.model import (  # noqa: E402
+    FAILURE_HTTP,
+    FAILURE_TRANSPORT,
+    Decision,
+    TokenRecord,
+    Usage,
+    merged_config,
+)
 
 NOW = 1789480000
 SECRET = "sk-ant-oat01-ZZSENTINELZZ-do-not-log-me-0123456789"
@@ -493,3 +500,60 @@ class TestLaunchd(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTransportFailuresDoNotMoveTheFleet(MonitorTestCase):
+    """v1.1 — the live 2026-09-16 defect, driven through the real monitor tick."""
+
+    @staticmethod
+    def _transport(label):
+        return Usage.failed(
+            label,
+            "probe failed: curl: (6) Could not resolve host: api.anthropic.com",
+            checked_at=NOW,
+            kind=FAILURE_TRANSPORT,
+        )
+
+    @staticmethod
+    def _http(label):
+        return Usage.failed(
+            label, "probe failed (HTTP 401): authentication_error",
+            checked_at=NOW, kind=FAILURE_HTTP,
+        )
+
+    def test_two_transport_failures_log_network_and_never_switch(self):
+        self.store.usages = [self._transport("a"), usage("b", 4.0)]
+        first = monitor.tick(self.store, NOW)
+        self.assertEqual("hold", first["decision"].action)
+        self.assertFalse(first["switched"])
+
+        self.store._state = dict(self.store.saved_state)
+        second = monitor.tick(self.store, NOW + int(7.5 * 3600))
+        self.assertEqual("hold", second["decision"].action)
+        self.assertFalse(second["switched"])
+
+        self.assertEqual([], self.written, "the shell must not be rewritten")
+        self.assertEqual([], self.notifications)
+        self.assertEqual({}, self.store.saved_state.get("parked", {}))
+        self.assertEqual(0, selector.consecutive_failures(self.store.saved_state, "a"))
+        network_lines = [m for m in self.logged if "network" in m.lower()]
+        self.assertEqual(2, len(network_lines), "both ticks log `hold — network`: %r" % self.logged)
+
+    def test_two_http_failures_do_switch(self):
+        self.store.usages = [self._http("a"), usage("b", 4.0)]
+        monitor.tick(self.store, NOW)
+        self.store._state = dict(self.store.saved_state)
+        second = monitor.tick(self.store, NOW + 300)
+        self.assertEqual("switch", second["decision"].action)
+        self.assertTrue(second["switched"])
+        self.assertEqual(["b"], self.written)
+
+    def test_a_successful_tick_between_failures_resets_the_counter(self):
+        self.store.usages = [self._http("a"), usage("b", 4.0)]
+        monitor.tick(self.store, NOW)
+        self.assertEqual(1, selector.consecutive_failures(self.store.saved_state, "a"))
+
+        self.store._state = dict(self.store.saved_state)
+        self.store.usages = [usage("a", 10.0), usage("b", 4.0)]
+        monitor.tick(self.store, NOW + 300)
+        self.assertEqual(0, selector.consecutive_failures(self.store.saved_state, "a"))

@@ -121,6 +121,29 @@ PROBE_RATELIMIT_HEADERS = "ratelimit_headers"  # POST /v1/messages max_tokens=0
 #: on this exact string to trigger immediately instead.
 NO_TOKEN_ERROR = "no token stored for this label"
 
+#: Why a probe failed. The distinction is load-bearing (v1.1, 2026-09-16):
+#:
+#: FAILURE_TRANSPORT — curl never got an HTTP status back: DNS did not resolve,
+#:   the connection failed or timed out, TLS broke, or we killed it ourselves.
+#:   The API said NOTHING about this token, so it is not evidence about the
+#:   token and must never count toward a switch. Measured live: two ticks 7.5
+#:   hours apart, both with the Mac asleep or freshly woken and no DNS, drove
+#:   `probe_failures` to 2 and produced `no_candidate`. With a second token
+#:   registered that sequence switches the fleet off a healthy token and parks
+#:   it for a full cooldown, during a blip the next token would hit identically.
+#:
+#: FAILURE_HTTP — the API answered ABOUT this token (401, 403, 429, 5xx). That
+#:   is evidence, and it counts toward MIN_CONSECUTIVE_FAILURES.
+#:
+#: FAILURE_LOCAL — we never tried: no keychain item for the label. A second
+#:   tick cannot learn more, so it triggers immediately (see _evaluate_trigger).
+#:
+#: "" means unclassified, and is treated as FAILURE_HTTP so anything not
+#: explicitly marked keeps v1 behaviour.
+FAILURE_TRANSPORT = "transport"
+FAILURE_HTTP = "http"
+FAILURE_LOCAL = "local"
+
 
 class Usage(NamedTuple):
     """One token's measured utilisation.
@@ -140,6 +163,7 @@ class Usage(NamedTuple):
     ok: bool
     error: str = ""
     checked_at: Optional[int] = None  # unix seconds
+    failure_kind: str = ""  # FAILURE_* when ok is False; "" when ok
 
     @property
     def usable(self) -> bool:
@@ -151,10 +175,20 @@ class Usage(NamedTuple):
 
     @staticmethod
     def from_json(data: Dict) -> "Usage":
-        return Usage(**data)
+        """Tolerant of a cache written by an older ctr: unknown keys are
+        dropped and missing ones fall back to the field default."""
+        fields = Usage._fields
+        return Usage(**{k: v for k, v in (data or {}).items() if k in fields})
 
     @staticmethod
-    def failed(label: str, error: str, checked_at: Optional[int] = None) -> "Usage":
+    def failed(
+        label: str,
+        error: str,
+        checked_at: Optional[int] = None,
+        kind: str = FAILURE_HTTP,
+    ) -> "Usage":
+        """A failed reading. `kind` defaults to FAILURE_HTTP so an unclassified
+        failure keeps v1's counting behaviour rather than silently going quiet."""
         return Usage(
             label=label,
             five_h=None,
@@ -166,6 +200,7 @@ class Usage(NamedTuple):
             ok=False,
             error=error,
             checked_at=checked_at if checked_at is not None else int(time.time()),
+            failure_kind=kind,
         )
 
 
@@ -279,6 +314,9 @@ __all__ = [
     "PROBE_OAUTH_USAGE",
     "PROBE_RATELIMIT_HEADERS",
     "NO_TOKEN_ERROR",
+    "FAILURE_TRANSPORT",
+    "FAILURE_HTTP",
+    "FAILURE_LOCAL",
     "Usage",
     "Decision",
     "Pane",

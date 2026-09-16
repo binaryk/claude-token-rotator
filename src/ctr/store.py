@@ -39,6 +39,11 @@ FILE_MODE = 0o600
 #: Anything matching these in a registry record is treated as a leaked secret.
 _SECRET_PREFIXES = ("sk-ant-", "sk-ant-oat", "sk-")
 _SECRET_RUN = re.compile(r"[A-Za-z0-9_\-]{40,}")
+#: state.json keys owned by selector.py, named here so cache_put can clear
+#: them without importing selector (which imports model only, by design).
+PROBE_FAILURES_KEY = "probe_failures"
+LAST_FAILURE_KEY = "probe_failed_at"
+
 _KNOWN_PROBES = (PROBE_OAUTH_USAGE, PROBE_RATELIMIT_HEADERS)
 
 
@@ -193,11 +198,28 @@ class Store:
         return usage
 
     def cache_put(self, usage: Usage) -> None:
-        """Cache a reading and remember which probe strategy produced it."""
+        """Cache a reading and remember which probe strategy produced it.
+
+        A SUCCESSFUL reading also clears that label's consecutive-failure
+        counter. Every command's success path funnels through here — `monitor`,
+        `status`, `list`, `add` — whereas only a monitor tick ever calls
+        `selector.record_probe_results`. Measured 2026-09-16: a `ctr status`
+        probed fine at 09:38 and cached the reading while `probe_failures`
+        stayed at 2 from two overnight network blips, so the very next tick
+        still counted itself one failure away from moving the fleet. (v1.1)
+        """
         state = self.state()
         cache = dict(state.get("cache", {}))
         cache[usage.label] = usage.to_json()
         state["cache"] = cache
+        if usage.ok:
+            counters = dict(state.get(PROBE_FAILURES_KEY, {}))
+            if counters.get(usage.label):
+                counters[usage.label] = 0
+                state[PROBE_FAILURES_KEY] = counters
+            stamps = dict(state.get(LAST_FAILURE_KEY, {}))
+            if stamps.pop(usage.label, None) is not None:
+                state[LAST_FAILURE_KEY] = stamps
         if usage.ok and usage.probe in _KNOWN_PROBES:
             strategies = dict(state.get("strategies", {}))
             strategies[usage.label] = usage.probe

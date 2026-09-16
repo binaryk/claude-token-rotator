@@ -15,6 +15,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 
 from ctr import selector  # noqa: E402
 from ctr.model import (  # noqa: E402
+    FAILURE_HTTP,
+    FAILURE_TRANSPORT,
     NO_TOKEN_ERROR,
     PROBE_RATELIMIT_HEADERS,
     Usage,
@@ -765,3 +767,143 @@ class RelaxedPassTests(unittest.TestCase):
         usages = [usage("b", 90.0)]
         self.assertIsNone(selector.choose_best(usages, (), CONFIG, state(), NOW))
         self.assertEqual("b", selector.choose_best(usages, (), CONFIG, state(), NOW, relax=True))
+
+
+# ---------------------------------------------------------------------------
+# v1.1 — a transport error says nothing about the token
+# ---------------------------------------------------------------------------
+
+
+def transport_failed(label, error="probe failed: curl: (6) Could not resolve host: api.anthropic.com"):
+    """A failure where no HTTP status came back at all."""
+    return Usage.failed(label, error, checked_at=NOW, kind=FAILURE_TRANSPORT)
+
+
+def http_failed(label, error="probe failed (HTTP 401): authentication_error"):
+    """A failure where the API answered ABOUT this token."""
+    return Usage.failed(label, error, checked_at=NOW, kind=FAILURE_HTTP)
+
+
+class TransportFailureTests(unittest.TestCase):
+    """RULING v1.1 — only an HTTP-level answer counts toward the de-bounce.
+
+    Reproduced from the live log on 2026-09-16. Two ticks 7.5 HOURS apart, both
+    of them the Mac asleep or just woken with no DNS:
+
+        01:26:36 hold — active 'social' probe failed (1/2 consecutive) ...
+                 curl: (28) Resolving timed out after 5305244 milliseconds
+        09:00:06 no_candidate — active 'social' probe failed 2 ticks in a row
+                 curl: (6) Could not resolve host: api.anthropic.com
+
+    `state.json` then read `probe_failures: {"social": 2}`. The API said nothing
+    about the token at either tick. With a second token registered, that exact
+    sequence switches the fleet off a healthy token and parks it for a full
+    cooldown, during a network blip the next token would hit identically.
+    """
+
+    def test_the_exact_live_sequence_never_switches(self):
+        first = [transport_failed("social", "probe failed: curl: (28) Resolving timed out"), usage("spare", 4.0)]
+        state_1 = selector.record_probe_results(state(), first, now=NOW)
+        decision_1 = selector.decide("social", first, state_1, CONFIG, NOW)
+        self.assertEqual("hold", decision_1.action)
+        self.assertIsNone(decision_1.target)
+        self.assertEqual(0, selector.consecutive_failures(state_1, "social"))
+
+        later = NOW + int(7.5 * 3600)  # the real gap between the two log lines
+        second = [transport_failed("social"), usage("spare", 4.0)]
+        state_2 = selector.record_probe_results(state_1, second, now=later)
+        decision_2 = selector.decide("social", second, state_2, CONFIG, later)
+        self.assertEqual("hold", decision_2.action, "a network blip must never move the fleet")
+        self.assertIsNone(decision_2.target)
+        self.assertEqual(0, selector.consecutive_failures(state_2, "social"))
+
+    def test_a_transport_hold_says_network(self):
+        usages = [transport_failed("social"), usage("spare", 4.0)]
+        current = selector.record_probe_results(state(), usages, now=NOW)
+        decision = selector.decide("social", usages, current, CONFIG, NOW)
+        self.assertIn("network", decision.reason.lower())
+        self.assertTrue(decision.triggered, "monitor.py logs on `triggered`")
+
+    def test_a_transport_failure_never_parks_anything(self):
+        usages = [transport_failed("social"), usage("spare", 4.0)]
+        current = selector.record_probe_results(state(), usages, now=NOW)
+        self.assertEqual({}, current.get("parked", {}))
+
+    def test_two_http_401s_in_a_row_still_switch(self):
+        usages = [http_failed("social"), usage("spare", 4.0)]
+        current = selector.record_probe_results(state(), usages, now=NOW)
+        self.assertEqual("hold", selector.decide("social", usages, current, CONFIG, NOW).action)
+        current = selector.record_probe_results(current, usages, now=NOW + 300)
+        self.assertEqual(2, selector.consecutive_failures(current, "social"))
+        decision = selector.decide("social", usages, current, CONFIG, NOW + 300)
+        self.assertEqual("switch", decision.action)
+        self.assertEqual("spare", decision.target)
+
+    def test_a_success_between_two_http_failures_resets(self):
+        bad = [http_failed("social"), usage("spare", 4.0)]
+        good = [usage("social", 12.0), usage("spare", 4.0)]
+        current = selector.record_probe_results(state(), bad, now=NOW)
+        self.assertEqual(1, selector.consecutive_failures(current, "social"))
+        current = selector.record_probe_results(current, good, now=NOW + 300)
+        self.assertEqual(0, selector.consecutive_failures(current, "social"))
+        current = selector.record_probe_results(current, bad, now=NOW + 600)
+        self.assertEqual(1, selector.consecutive_failures(current, "social"))
+        self.assertEqual("hold", selector.decide("social", bad, current, CONFIG, NOW + 600).action)
+
+    def test_a_long_gap_restarts_the_count_at_one(self):
+        """Two failures 7.5h apart are not 'consecutive' in any useful sense."""
+        bad = [http_failed("social"), usage("spare", 4.0)]
+        current = selector.record_probe_results(state(), bad, now=NOW)
+        self.assertEqual(1, selector.consecutive_failures(current, "social"))
+        later = NOW + int(7.5 * 3600)
+        current = selector.record_probe_results(current, bad, now=later)
+        self.assertEqual(1, selector.consecutive_failures(current, "social"),
+                         "the Mac slept; this is a fresh first failure")
+        self.assertEqual("hold", selector.decide("social", bad, current, CONFIG, later).action)
+
+    def test_failures_inside_the_gap_still_accumulate(self):
+        bad = [http_failed("social"), usage("spare", 4.0)]
+        current = selector.record_probe_results(state(), bad, now=NOW)
+        within = NOW + selector.FAILURE_GAP_RESET_S - 1
+        current = selector.record_probe_results(current, bad, now=within)
+        self.assertEqual(2, selector.consecutive_failures(current, "social"))
+
+    def test_a_transport_failure_does_not_clear_an_http_count(self):
+        """A blip in the middle must neither add to nor erase real evidence."""
+        bad = [http_failed("social"), usage("spare", 4.0)]
+        blip = [transport_failed("social"), usage("spare", 4.0)]
+        current = selector.record_probe_results(state(), bad, now=NOW)
+        current = selector.record_probe_results(current, blip, now=NOW + 300)
+        self.assertEqual(1, selector.consecutive_failures(current, "social"))
+
+    def test_rejected_still_triggers_immediately(self):
+        usages = [usage("social", 100.0, status="rejected"), usage("spare", 4.0)]
+        current = selector.record_probe_results(state(), usages, now=NOW)
+        decision = selector.decide("social", usages, current, CONFIG, NOW)
+        self.assertEqual("switch", decision.action)
+        self.assertEqual("spare", decision.target)
+
+    def test_a_missing_keychain_item_still_triggers_immediately(self):
+        usages = [Usage.failed("social", NO_TOKEN_ERROR, NOW), usage("spare", 4.0)]
+        current = selector.record_probe_results(state(), usages, now=NOW)
+        self.assertEqual("switch", selector.decide("social", usages, current, CONFIG, NOW).action)
+
+    def test_record_probe_results_still_returns_a_new_state(self):
+        original = state()
+        snapshot = json.loads(json.dumps(original))
+        fresh = selector.record_probe_results(original, [transport_failed("a")], now=NOW)
+        self.assertEqual(snapshot, original)
+        self.assertIsNot(fresh, original)
+
+    def test_the_counters_survive_a_state_json_round_trip(self):
+        current = selector.record_probe_results(state(), [http_failed("a")], now=NOW)
+        reloaded = json.loads(json.dumps(current))
+        self.assertEqual(1, selector.consecutive_failures(reloaded, "a"))
+        current = selector.record_probe_results(reloaded, [http_failed("a")], now=NOW + 300)
+        self.assertEqual(2, selector.consecutive_failures(current, "a"))
+
+    def test_an_unclassified_failure_still_counts(self):
+        """Anything not explicitly marked transport keeps v1 behaviour."""
+        usages = [Usage.failed("social", "something odd", NOW), usage("spare", 4.0)]
+        current = selector.record_probe_results(state(), usages, now=NOW)
+        self.assertEqual(1, selector.consecutive_failures(current, "social"))
