@@ -34,6 +34,10 @@ CLAUDE_CONFIG_JSON = "~/.claude.json"
 DEFAULT_TIMEOUT_S = 15
 #: Account recorded on a keychain item when the caller has no better name.
 DEFAULT_ACCOUNT = "ctr"
+
+#: A service should hold ONE item; this only bounds the purge loop so a
+#: pathological keychain cannot spin it forever.
+_MAX_DUPLICATES = 16
 #: `security -D` kind, so the items are recognisable in Keychain Access.
 ITEM_KIND = "ctr long-lived Claude token"
 
@@ -51,6 +55,16 @@ def _run(
 
     `stdin_data` may contain a secret; it is never echoed back by `security`
     and never lands in argv.
+
+    `start_new_session=True` is load-bearing, not tidiness. `security ... -w`
+    with no value reads the secret from the CONTROLLING TERMINAL when it has
+    one, ignoring the pipe entirely: run from a real shell it printed
+    "password data for new item:" at the user, sat there, and then stored an
+    EMPTY password — every `ctr add` form was broken (measured 2026-09-16 in
+    Warp, and reproduced here under `pty.fork`). setsid() detaches the child
+    from the terminal, so `security` cannot open /dev/tty and falls back to
+    stdin, which is where the secret actually is. The bug was invisible for a
+    day because no test and no agent Bash call ever has a controlling TTY.
     """
     try:
         proc = subprocess.Popen(
@@ -59,6 +73,7 @@ def _run(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             universal_newlines=True,
+            start_new_session=True,
         )
     except OSError as exc:
         return 127, "", "cannot run %s: %s" % (cmd[0], exc.strerror or "os error")
@@ -116,6 +131,14 @@ def set(service: str, account: str, secret: str) -> None:  # noqa: A001 (frozen 
         ITEM_KIND,
         "-w",  # MUST stay last: makes `security` read the value from stdin
     ]
+    # Purge any existing item(s) for this service FIRST. `add -U` keys on
+    # (service, account) and only replaces a matching account, so writing under
+    # a new account leaves an old one behind — and `get()` (service-only) may
+    # then read the stale one back and wrongly report the write unverified.
+    # Measured 2026-09-16: a failed `--from-login` left an empty item under the
+    # login email, and a later `ctr add <label> <token>` (a different account)
+    # stored the real token yet failed verification against the empty ghost.
+    delete(service)
     rc, _out, err = _run(cmd, stdin_data="%s\n%s\n" % (secret, secret))
     if rc != 0:
         raise KeychainError(
@@ -129,11 +152,23 @@ def set(service: str, account: str, secret: str) -> None:  # noqa: A001 (frozen 
 
 
 def delete(service: str) -> bool:
-    """Delete the item. False when it was not there."""
+    """Delete the item(s) for `service`. False when none existed.
+
+    macOS keys a generic-password item by (service, ACCOUNT), so one service
+    can hold several items under different accounts — e.g. a stale empty item
+    left by a failed write under a different account than the retry. A single
+    `delete-generic-password` removes only one, so loop until the keychain
+    reports nothing left, and treat that as full purge.
+    """
     if not service:
         return False
-    rc, _out, _err = _run([SECURITY, "delete-generic-password", "-s", service])
-    return rc == 0
+    deleted = False
+    for _ in range(_MAX_DUPLICATES):
+        rc, _out, _err = _run([SECURITY, "delete-generic-password", "-s", service])
+        if rc != 0:
+            break
+        deleted = True
+    return deleted
 
 
 def list_ctr_services(labels: Optional[List[str]] = None) -> List[str]:

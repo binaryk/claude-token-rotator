@@ -355,7 +355,11 @@ class TestKeychain(KeychainTestCase):
     def test_set_sends_the_secret_on_stdin_twice_and_never_in_argv(self):
         fake = self.install(FakeSecurity())
         keychain.set("ctr:social", "alice@example.com", FAKE_TOKEN)
-        cmd, stdin_data = fake.calls[0]
+        # set() purges any pre-existing item for the service before writing, so
+        # the add is no longer calls[0]. Locate it by verb rather than index.
+        adds = [c for c in fake.calls if c[0][1] == "add-generic-password"]
+        self.assertEqual(1, len(adds), "exactly one add-generic-password call")
+        cmd, stdin_data = adds[0]
         self.assertEqual(cmd[-1], "-w", "-w must stay last so security reads stdin")
         for element in cmd:
             self.assertNotIn(FAKE_TOKEN, element)
