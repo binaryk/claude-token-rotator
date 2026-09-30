@@ -20,6 +20,8 @@ Switched to 'spare'. Claude Code's credentials store now holds it.
 
 `ctr ui` shows the same thing full-screen, btop-style, and switches on Enter.
 
+![ctr ui](assets/ctr-ui.svg)
+
 macOS only. Python 3.8+, standard library only. The optional dashboard needs
 [Textual](https://textual.textualize.io) (see [Dashboard](#dashboard-ctr-ui)).
 
@@ -157,13 +159,7 @@ for real, and `--only <pane-id>` to do a single pane while you watch.
 
 ## Dashboard (`ctr ui`)
 
-```
- mode: keychain   active: work   Claude store holds: work   sessions: 13 follow · 2 pinned by env
-    ACCOUNT                    STATUS   5H                 5H RESET  7D                 7D RESET  OVERAGE   FABLE
- ●  work   you@example.com     allowed  ██████████░░  83%  in 1h12m  ███░░░░░░░░░  27%  in 159h  allowed   yes
-    spare  alt@example.com     allowed  ░░░░░░░░░░░░   4%  in 3h11m  █░░░░░░░░░░░  12%  in 159h  -         NO (limit)
- ⏎ switch  q quit  r refresh  f probe Fable
-```
+![ctr ui: one row per Claude account with 5-hour and 7-day usage bars, reset countdowns, overage state and Fable availability](assets/ctr-ui.svg)
 
 One row per account: status, 5-hour and 7-day bars with reset countdowns,
 extra-usage (overage) state, and whether the Fable model still answers.
