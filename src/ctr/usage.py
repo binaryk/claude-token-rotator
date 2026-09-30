@@ -80,6 +80,8 @@ HEADER_5H_RESET = "anthropic-ratelimit-unified-5h-reset"
 HEADER_7D_RESET = "anthropic-ratelimit-unified-7d-reset"
 HEADER_5H_STATUS = "anthropic-ratelimit-unified-5h-status"
 HEADER_7D_STATUS = "anthropic-ratelimit-unified-7d-status"
+HEADER_OVERAGE_STATUS = "anthropic-ratelimit-unified-overage-status"
+HEADER_OVERAGE_REASON = "anthropic-ratelimit-unified-overage-disabled-reason"
 HEADER_STATUS = "anthropic-ratelimit-unified-status"
 
 #: Utilisation is a percentage; anything outside this range is a broken or
@@ -241,7 +243,17 @@ def parse_ratelimit_headers(label: str, raw_headers: str, now: int) -> Usage:
         ok=True,
         error=_note_clamped(base, clamped_5h or clamped_7d),
         checked_at=now,
+        overage=_overage(headers),
     )
+
+
+def _overage(headers: Dict[str, str]) -> str:
+    """"allowed", "rejected (out_of_credits)", ... or "" when absent."""
+    status = (headers.get(HEADER_OVERAGE_STATUS) or "").strip()
+    reason = (headers.get(HEADER_OVERAGE_REASON) or "").strip()
+    if not status:
+        return ""
+    return "%s (%s)" % (status, reason) if reason else status
 
 
 def _clamp_util(value: Optional[float]) -> Tuple[Optional[float], bool]:

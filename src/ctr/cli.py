@@ -18,9 +18,9 @@ import re
 import sys
 import tempfile
 import time
-from typing import Dict, List, Optional
+from typing import List, Optional
 
-from ctr import render, shell
+from ctr import cli_switch, pretty, render, shell
 from ctr.model import (
     CLAUDE_KEYCHAIN_SERVICE,
     CONFIG_DIR,
@@ -199,11 +199,14 @@ def _usages(store, records: List[TokenRecord], fresh: bool) -> List[Usage]:
     ]
 
 
-def _activate(store, args, label: Optional[str]) -> str:
-    """Write active.sh and record the active label. Returns the path written."""
-    path = shell.write_active(label, _active_path(args))
-    store.set_active(label)
-    return path
+def _activate(store, args, label: Optional[str], mode: Optional[str] = None) -> str:
+    """Apply `label` in `mode` (default: the current one). Returns active.sh's path."""
+    from ctr import switcher
+
+    try:
+        return switcher.activate(store, label, mode, _active_path(args))["active_sh"]
+    except switcher.SwitchError as exc:
+        raise CtrError(str(exc))
 
 
 # ---------------------------------------------------------------------------
@@ -324,13 +327,14 @@ def cmd_status(args) -> int:
     now = _now()
     usages = _usages(store, records, args.fresh) if records else []
     if args.json:
-        _out(json.dumps(render.status_json(store, records, usages, active, now),
-                        indent=2, sort_keys=True))
+        payload = render.status_json(store, records, usages, active, now)
+        payload.update(cli_switch.live_extras(store))
+        _out(json.dumps(payload, indent=2, sort_keys=True))
         return 0
     if not records:
         _out("No tokens registered yet. Add one: ctr add <label>")
         return 0
-    render.print_tokens(store, records, usages, active, now)
+    pretty.print_tokens(store, records, usages, active, now)
     _out("")
     _out(render.headroom_line(store, records, usages, active, now))
     return 0
@@ -374,7 +378,7 @@ def cmd_use(args) -> int:
     label = args.label
     if store.get(label) is None:
         raise CtrUsage("no token labelled '%s' — see: ctr list" % label)
-    path = _activate(store, args, label)
+    path = _activate(store, args, label, shell.MODE_ENV)
     render.switch_notice(label, path)
     return 0
 
@@ -398,6 +402,19 @@ def cmd_next(args) -> int:
         )
     path = _activate(store, args, target)
     render.switch_notice(target, path)
+    return 0
+
+
+def cmd_auto(args) -> int:
+    store = _store(args)
+    if args.state is not None:
+        store.update_config({"auto_switch": args.state == "on"})
+    config = store.config()
+    state = "ON" if config.get("auto_switch", True) else "OFF"
+    _out(
+        "auto-switch %s: the monitor switches when the active token reaches "
+        "%.0f%% (5h) or %.0f%% (7d)" % (state, config["switch_at_5h"], config["switch_at_7d"])
+    )
     return 0
 
 
@@ -474,7 +491,7 @@ def cmd_install_shell(args) -> int:
     if not os.path.isdir(directory):
         os.makedirs(directory, 0o700)
     os.chmod(directory, 0o700)
-    active = shell.write_active(store.active(), _active_path(args))
+    active = shell.write_active(store.active(), _active_path(args), store.switch_mode())
     rc_file = shell.install_zshrc(getattr(args, "rc_file", None), _active_path(args))
     render.shell_installed(rc_file, active)
     return 0
@@ -553,25 +570,15 @@ def _doctor_shell(args, store) -> List:
             "says '%s' but tokens.json says '%s' — run: ctr use <label>"
             % (info["active_label"] or "(none)", recorded or "(none)"),
         ))
-    if os.environ.get(ENV_VAR) is None:
-        out.append(("warn", ENV_VAR, "not set in this shell — source %s" % info["active_path"]))
-    else:
-        out.append(("ok", ENV_VAR, "set in this shell (%s)" % redact(os.environ.get(ENV_VAR))))
-    return out
+    return out + cli_switch.doctor_mode(store, info["active_path"])
 
 
 #: MEASURED (lane-addendum RULING 2): each of these defeats ctr, differently.
 CONFLICTING_ENV = [
-    (
-        "ANTHROPIC_API_KEY",
-        "`claude -p` HANGS and never answers (measured: killed at 90s). "
-        "`claude auth status` still says oauth_token, so it looks fine.",
-    ),
-    (
-        "ANTHROPIC_AUTH_TOKEN",
-        '`claude` says "Not logged in - Please run /login", even with a valid '
-        "CLAUDE_CODE_OAUTH_TOKEN.",
-    ),
+    ("ANTHROPIC_API_KEY", "`claude -p` HANGS and never answers (measured: killed at 90s). "
+     "`claude auth status` still says oauth_token, so it looks fine."),
+    ("ANTHROPIC_AUTH_TOKEN", '`claude` says "Not logged in - Please run /login", even with '
+     "a valid CLAUDE_CODE_OAUTH_TOKEN."),
 ]
 
 
@@ -706,6 +713,10 @@ def _register_switch_commands(subparsers) -> None:
     nxt.add_argument("--fresh", action="store_true", help="bypass the usage cache")
     nxt.set_defaults(handler=cmd_next)
 
+    auto = subparsers.add_parser("auto", help="show or set automatic switching (on/off)")
+    auto.add_argument("state", nargs="?", choices=("on", "off"), help="omit to show the current state")
+    auto.set_defaults(handler=cmd_auto)
+
     active = subparsers.add_parser("active", help="print the active label")
     active.set_defaults(handler=cmd_active)
 
@@ -768,6 +779,7 @@ def build_parser() -> argparse.ArgumentParser:
     _register_token_commands(subparsers)
     _register_switch_commands(subparsers)
     _register_service_commands(subparsers)
+    cli_switch.register(subparsers)
     return parser
 
 

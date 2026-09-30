@@ -76,6 +76,12 @@ class FakeStore(object):
         self._maybe_raise("set_active")
         self._active = label
 
+    def switch_mode(self):
+        return self._state.get("switch_mode", "env")
+
+    def set_switch_mode(self, mode):
+        self._state["switch_mode"] = mode
+
     def state(self):
         self._maybe_raise("state")
         return dict(self._state)
@@ -123,7 +129,7 @@ class MonitorTestCase(unittest.TestCase):
         import ctr.shell
         import ctr.usage
         self._patch(ctr.keychain, "token_for", lambda label: SECRET)
-        self._patch(ctr.shell, "write_active", lambda label, path=None: (
+        self._patch(ctr.shell, "write_active", lambda label, path=None, mode="env": (
             self.written.append(label) or os.path.join(self.tmp, "active.sh")))
 
         store = self.store = FakeStore()
@@ -164,6 +170,22 @@ class TestTick(MonitorTestCase):
         self.assertEqual([], self.written)
         self.assertEqual("a", self.store._active)
         self.assertEqual([], self.notifications)
+
+    def test_auto_switch_off_probes_but_never_switches(self):
+        self.store._config = {"auto_switch": False}
+        result = monitor.tick(self.store, NOW)
+        self.assertFalse(result["switched"])
+        self.assertEqual("switch", result["decision"].action, "the decision is still computed")
+        self.assertEqual([], self.written)
+        self.assertEqual("a", self.store._active)
+        self.assertEqual([], self.notifications)
+        self.assertTrue(any("would switch" in line for line in self.logged))
+
+    def test_auto_switch_on_explicitly_switches(self):
+        self.store._config = {"auto_switch": True}
+        result = monitor.tick(self.store, NOW)
+        self.assertTrue(result["switched"])
+        self.assertEqual("b", self.store._active)
 
     def test_a_healthy_active_token_holds(self):
         self.store.usages = [usage("a", 10.0), usage("b", 5.0)]
@@ -233,7 +255,7 @@ class TestNoSecretReachesTheLog(MonitorTestCase):
     def test_a_failing_write_active_cannot_log_its_message(self):
         import ctr.shell
 
-        def exploding_write(label, path=None):
+        def exploding_write(label, path=None, mode="env"):
             raise OSError("cannot write /tmp/x: token was %s" % SECRET)
 
         self._patch(ctr.shell, "write_active", exploding_write)

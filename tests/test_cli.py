@@ -59,6 +59,11 @@ class CliTestCase(unittest.TestCase):
                     lambda label: self.keychain_items.get("ctr:" + label))
         self._patch(keychain, "claude_login_token", lambda: None)
         self._patch(keychain, "claude_login_info", lambda: {})
+        # v2: status/switch read Claude's credentials store and the process
+        # table; neither may reach the real ones from a test.
+        from ctr import claude_login, sessions
+        self._patch(claude_login, "_run", lambda cmd, stdin_data=None: (44, "", "not found"))
+        self._patch(sessions, "_ps", lambda: "")
 
         def fake_probe(label, token, timeout_s=20, prefer=None):
             self.probed.append(label)

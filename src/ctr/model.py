@@ -62,6 +62,10 @@ DEFAULTS = {
     "http_timeout_s": 20,
     # Monitor: run rollover automatically after a switch.
     "auto_rollover": False,
+    # Monitor: switch automatically when a threshold is crossed. False = the
+    # monitor still probes and logs "would switch", but never switches.
+    # Toggle with `ctr auto on|off`.
+    "auto_switch": True,
 }
 
 
@@ -164,6 +168,9 @@ class Usage(NamedTuple):
     error: str = ""
     checked_at: Optional[int] = None  # unix seconds
     failure_kind: str = ""  # FAILURE_* when ok is False; "" when ok
+    #: Extra-usage (overage) state from the headers: "allowed", "rejected
+    #: (out_of_credits)", ... or "" when the probe did not report it. (v2)
+    overage: str = ""
 
     @property
     def usable(self) -> bool:

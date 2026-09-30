@@ -164,27 +164,24 @@ def _cache(store, usages: List[Usage]) -> None:
 
 
 def _apply_switch(store, state: Dict, active: Optional[str], target: str, now: int) -> bool:
-    """Point the shell at `target` and record it. True when it took effect."""
-    from ctr import shell
+    """Switch to `target` in the store's mode and record it. True when it took effect.
+
+    In keychain mode this also rewrites Claude Code's credentials store, so the
+    running sessions move with it (see switcher).
+    """
+    from ctr import switcher
 
     try:
-        shell.write_active(target)
-    except Exception as exc:
-        log_line("switch to '%s' aborted: could not write active.sh (%s)" % (target, _safe(exc)))
-        return False
-    try:
-        store.set_active(target)
+        result = switcher.activate(store, target)
     except Exception as exc:
         # A switch that did not persist is NOT a switch. Reporting True here
         # logged and notified a rotation that never happened and stamped
         # last_switch_at, which then suppressed the real switch for a whole
-        # min_switch_interval_s. active.sh is already pointing at `target`, so
-        # the next tick simply rewrites it and retries the registry.
-        log_line(
-            "switch to '%s' NOT recorded: active.sh written but the registry "
-            "update failed (%s) — will retry next tick" % (target, _safe(exc))
-        )
+        # min_switch_interval_s. The next tick simply retries.
+        log_line("switch to '%s' aborted (%s) — will retry next tick" % (target, _safe(exc)))
         return False
+    if result.get("mode") == "keychain":
+        log_line("switch to '%s': Claude Code credentials store updated" % target)
     if active:
         state.update(selector.park(state, active, now))  # park() returns a new dict
     state["last_switch_at"] = int(now)
@@ -220,6 +217,8 @@ def _tick_inner(store, now: int, apply: bool, auto_rollover: bool) -> Dict:
     decision = selector.decide(active, usages, state, config, now)
 
     switched = False
+    if not config.get("auto_switch", True):
+        apply = False  # auto-switch OFF: probe and log, never switch
     # "no_active" carries a proposal too: without this the monitor logs the same
     # line every tick forever after `ctr remove` of the active token.
     if decision.action in ("switch", "no_active") and decision.target and apply:

@@ -76,12 +76,37 @@ _HEADER = (
 # ---------------------------------------------------------------------------
 
 
-def active_sh_contents(label: Optional[str]) -> str:
+MODE_ENV = "env"
+MODE_KEYCHAIN = "keychain"
+SWITCH_MODES = (MODE_ENV, MODE_KEYCHAIN)
+
+
+def active_sh_contents(label: Optional[str], mode: str = MODE_ENV) -> str:
     """Body of ``active.sh`` for ``label`` (or the inert body when None).
 
     Safe to source in every case: a missing keychain item leaves ``ENV_VAR``
     untouched and prints nothing, and ``label=None`` changes nothing at all.
+
+    ``mode="keychain"`` (set by `ctr switch`) exports NO token and unsets an
+    inherited one: the account lives in Claude Code's own credentials store,
+    and a session only follows a later switch if it was started without
+    ``ENV_VAR`` (measured 2026-09-30).
     """
+    if mode not in SWITCH_MODES:
+        raise ValueError("unknown switch mode: %r" % (mode,))
+    if label is not None and mode == MODE_KEYCHAIN:
+        if not valid_label(label):
+            raise ValueError("invalid token label: %r" % (label,))
+        return (
+            "# ctr (claude-token-rotator) — generated file. It contains NO secret.\n"
+            + "# Keychain mode: the active account lives in Claude Code's own\n"
+            + "# credentials store, so running sessions follow `ctr switch`.\n"
+            + "# Regenerate with: ctr switch <label>\n"
+            + "CTR_ACTIVE_LABEL='%s'\n" % label
+            + "export CTR_ACTIVE_LABEL\n"
+            + "# A session started with %s set is pinned to that token.\n" % ENV_VAR
+            + "unset %s\n" % ENV_VAR
+        )
     if label is None:
         return (
             _HEADER
@@ -215,11 +240,13 @@ def _read(path: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def write_active(label: Optional[str], path: Optional[str] = None) -> str:
+def write_active(
+    label: Optional[str], path: Optional[str] = None, mode: str = MODE_ENV
+) -> str:
     """Write ``active.sh`` for ``label``. Returns the absolute path written."""
     target = os.path.expanduser(path or ACTIVE_FILE)
     _ensure_parent(target)
-    _atomic_write(target, active_sh_contents(label), 0o600)
+    _atomic_write(target, active_sh_contents(label, mode), 0o600)
     return target
 
 

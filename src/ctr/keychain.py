@@ -212,6 +212,12 @@ def claude_login_token() -> Optional[str]:
         return None
     oauth = _claude_oauth_blob(blob)
     token = oauth.get("accessToken")
+    refresh = oauth.get("refreshToken")
+    # No refresh token = not an interactive login: after `ctr switch` the item
+    # holds a ctr setup-token, and re-registering that as "the login" would
+    # duplicate it under a second label.
+    if not (isinstance(refresh, str) and refresh):
+        return None
     return token if isinstance(token, str) and token else None
 
 

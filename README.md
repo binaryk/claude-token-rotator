@@ -13,24 +13,80 @@ $ claude-rotator list
 *  work    you@example.com    max   oat    2026-09-10   89%  in 42m    27%  in 159h
    spare   alt@example.com    max   oat    2026-09-11    4%  in 3h11m   12%  in 159h
 
-$ claude-rotator next
-Switched to 'spare'. New shells will use it.
-Sessions already running keep the old token. Run `claude-rotator rollover`.
+$ claude-rotator switch spare
+Switched to 'spare'. Claude Code's credentials store now holds it.
+6 running claude session(s) follow it from their next request.
 ```
 
-macOS only. Python 3.8+, standard library only, no pip install.
+`ctr ui` shows the same thing full-screen, btop-style, and switches on Enter.
 
-## Running sessions keep their old token
+macOS only. Python 3.8+, standard library only. The optional dashboard needs
+[Textual](https://textual.textualize.io) (see [Dashboard](#dashboard-ctr-ui)).
 
-A running `claude` process holds its token in memory. Changing the environment
-variable or the keychain does nothing to it. A session parked on
-`Usage limit reached · continuing automatically at 4pm` stays parked even after
-you switch accounts, because it will retry with the token it started with.
+## Switching running sessions
 
-The only fix is to restart that session. `ctr rollover` does it with
-`/exit` followed by `claude --resume <session-id>`, so the conversation
-survives. It drives [herdr](https://herdr.dev) panes and is a no-op if you
-don't use herdr; everything else works standalone.
+`ctr` has two ways to apply the active token.
+
+**Keychain mode (`ctr switch <alias>`) moves running sessions.** Claude Code
+keeps its login in the keychain item `Claude Code-credentials` and re-reads it
+before each token-refresh check (with a 30-second read cache) and straight
+after any 401. `ctr switch` writes the chosen token into that item, so every
+running `claude` that was started *without* `CLAUDE_CODE_OAUTH_TOKEN` moves to
+the new account on its next request. There is no restart and no lost context.
+Measured on Claude Code 2.1.285 with a logging proxy that fingerprinted the
+bearer of every request:
+
+- the prompt sent 35 s after a switch went out on the new account, with that
+  account's own rate-limit headers;
+- a prompt sent the instant after a switch went out once on the old cached
+  token. If that token was already dead, the 401 made Claude re-read the store
+  and retry on the new account, so the user saw nothing. If it was still
+  valid, the request succeeded on the old account and the move happened within
+  30 s;
+- a session started with `CLAUDE_CODE_OAUTH_TOKEN` in its environment ignored
+  the store completely.
+
+Only the `claudeAiOauth` part of the item changes. Everything else in it
+(`mcpOAuth`, your MCP server logins) is written back untouched. If the keychain
+cannot be read (locked, timed out), `ctr` writes nothing at all rather than
+treating the item as empty. The interactive `/login` it replaces is saved first
+as `ctr-login:Claude Code-credentials` and re-captured on every switch, so a
+refresh token rotated by a running session is picked up next time. Put it back
+with:
+
+```sh
+claude-rotator switch --restore-login
+```
+
+If you ran `claude /login` since the switch, the store already holds a newer
+login. Restore keeps that one and makes it the saved copy, instead of
+overwriting it with the older backup. `ctr use` (leaving keychain mode) and
+removing the active token also hand the login back. There is one narrow race
+left: a session refreshing the `/login` in the same ~100 ms that `ctr switch`
+replaces it would lose that rotation, and restore would then need
+`claude /login`. `ctr` reads `CLAUDE_CONFIG_DIR` from its own environment to
+find the item, so run `ctr` with the same value your `claude` uses (unset by
+default).
+
+While a setup-token is in the store, Claude Code only has the
+`user:inference` scope, so features that need your full login (claude.ai
+connectors, `/usage`) are unavailable until you restore it.
+
+`ctr switch` also counts the running sessions that *won't* follow: those
+started with `CLAUDE_CODE_OAUTH_TOKEN` set. It reads them with `ps -E` (your own
+processes only) and names which token each one is pinned to, without printing
+the token. In keychain mode `active.sh` exports no token and unsets an inherited
+one, so every new shell starts sessions that follow.
+
+**Env mode (`ctr use <alias>`, the v1 behaviour)** exports
+`CLAUDE_CODE_OAUTH_TOKEN` for new shells and never touches Claude's store. A
+running `claude` holds that token in memory, so a session parked on
+`Usage limit reached · continuing automatically at 4pm` stays parked after you
+switch. The fix is to restart it: `ctr rollover` sends `/exit`, then
+`claude --resume <session-id>`, so the conversation survives. It drives
+[herdr](https://herdr.dev) panes and does nothing if you don't use herdr.
+
+`ctr next` and the monitor switch in whichever mode you used last.
 
 ## Install
 
@@ -88,13 +144,50 @@ rotation too.
 claude-rotator list             # every token with live usage and reset times
 claude-rotator status --json    # same thing, machine readable
 claude-rotator next             # switch to whichever token has the most headroom
-claude-rotator use spare        # or pick one by name
+claude-rotator switch spare     # move Claude's own login; running sessions follow
+claude-rotator switch spare --json
+claude-rotator use spare        # env mode: new shells only
+claude-rotator ui               # full-screen dashboard (alias: top)
 claude-rotator rollover         # restart parked sessions on the new token (dry run)
 claude-rotator doctor           # check the whole install end to end
 ```
 
 `rollover` prints what it would do and touches nothing. Add `--apply` to run it
 for real, and `--only <pane-id>` to do a single pane while you watch.
+
+## Dashboard (`ctr ui`)
+
+```
+ mode: keychain   active: work   Claude store holds: work   sessions: 13 follow · 2 pinned by env
+    ACCOUNT                    STATUS   5H                 5H RESET  7D                 7D RESET  OVERAGE   FABLE
+ ●  work   you@example.com     allowed  ██████████░░  83%  in 1h12m  ███░░░░░░░░░  27%  in 159h  allowed   yes
+    spare  alt@example.com     allowed  ░░░░░░░░░░░░   4%  in 3h11m  █░░░░░░░░░░░  12%  in 159h  -         NO (limit)
+ ⏎ switch  q quit  r refresh  f probe Fable
+```
+
+One row per account: status, 5-hour and 7-day bars with reset countdowns,
+extra-usage (overage) state, and whether the Fable model still answers.
+`↑`/`↓` or `j`/`k` select, `Enter` runs `ctr switch` on the row, `r` refreshes
+now, `f` re-probes Fable, `q` quits. Usage refreshes every 60 s
+(`--interval`) through the same cache as `ctr status`, so it costs one tiny
+request per account per minute.
+
+Fable availability is probed lazily: one `claude -p` on Fable per account,
+cached for 30 minutes. It needs the real CLI because a raw API request with a
+Fable model returns 429 on every OAuth account whether or not the quota is
+spent. The probe hands the token over in the environment, never argv, and runs
+with no setting sources and a private config dir, so none of your hooks or
+plugins fire.
+
+The dashboard needs Textual. The rest of `ctr` stays standard-library only, and
+`ctr ui` tells you what to install when it is missing:
+
+```sh
+python3 -m pip install --user 'textual>=0.47'
+```
+
+With Textual (or just Rich) installed, `ctr status` in a terminal also prints
+coloured bars. Piped output stays the plain table.
 
 ## How it picks
 
@@ -137,8 +230,18 @@ Override any of these in `~/.config/ctr/config.json`:
   "min_switch_interval_s": 600,
   "cache_ttl_s": 60,
   "http_timeout_s": 20,
-  "auto_rollover": false
+  "auto_rollover": false,
+  "auto_switch": true
 }
+```
+
+`auto_switch` is the on/off switch for automatic rotation (default on). With it
+off, the monitor keeps probing and logs "would switch", but never switches.
+
+```sh
+ctr auto        # show the state and the thresholds in effect
+ctr auto off    # stop automatic switching
+ctr auto on     # resume it
 ```
 
 ## Monitoring
@@ -183,7 +286,7 @@ if [ -n "$_ctr_tok" ]; then export CLAUDE_CODE_OAUTH_TOKEN="$_ctr_tok"; fi
 unset _ctr_tok
 ```
 
-Tokens never appear in `argv`, so they never show up in `ps`. Writes go in on
+`ctr`'s own tokens never appear in `argv`, so they never show up in `ps`. Writes go in on
 stdin: `security add-generic-password ... -w` with no value prompts twice and
 reads both from stdin. (Feeding it the secret only once stores an **empty**
 password and still exits 0, which is worth knowing if you script `security`
@@ -193,9 +296,15 @@ Usage probes send your token and the word "hi" to `api.anthropic.com`. Nothing
 goes anywhere else, and no log or config file ever contains more than the first
 six characters of a token.
 
-`ctr` does not touch the `Claude Code-credentials` keychain item that your
-interactive login uses. It only sets an environment variable, so `claude
-/login` keeps behaving normally.
+In env mode `ctr` never touches the `Claude Code-credentials` item. In keychain
+mode it replaces only `claudeAiOauth` in it, as described in
+[Switching running sessions](#switching-running-sessions). That item holds more
+than one token, and with a few MCP logins it grows past the 4 KB line limit of
+`security -i`. The stdin prompt silently truncates at 128 bytes. So, exactly
+like Claude Code does for the same item on every token refresh, `ctr` passes
+larger payloads hex-encoded in `argv` for the few milliseconds `security` runs.
+That is the only place `ctr` puts secret material in `argv`, and it adds no
+exposure Claude Code does not already create.
 
 ## How usage is measured
 
@@ -264,7 +373,7 @@ Then delete the guarded block from `~/.zshrc`, markers included.
 ## Development
 
 ```sh
-PYTHONPATH=src python3 -m unittest discover -s tests -t .   # 435 tests
+PYTHONPATH=src python3 -m unittest discover -s tests -t .   # 527 tests; the TUI test skips without Textual
 python3 -m py_compile $(git ls-files "src/ctr/*.py")
 ```
 

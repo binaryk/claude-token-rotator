@@ -47,6 +47,10 @@ LAST_FAILURE_KEY = "probe_failed_at"
 _KNOWN_PROBES = (PROBE_OAUTH_USAGE, PROBE_RATELIMIT_HEADERS)
 
 
+#: state.json key recording how the active token is applied.
+SWITCH_MODE_KEY = "switch_mode"
+
+
 class StoreError(RuntimeError):
     """The on-disk state is unusable (corrupt JSON, unwritable directory)."""
 
@@ -172,11 +176,35 @@ class Store:
             raise ValueError("state must be a dict")
         self._write_atomic(self.state_path, state)
 
+    # -- switch mode ------------------------------------------------------
+
+    def switch_mode(self) -> str:
+        """"env" (v1: new shells get CLAUDE_CODE_OAUTH_TOKEN) or "keychain"
+        (`ctr switch`: Claude Code's own store, running sessions follow)."""
+        value = self.state().get(SWITCH_MODE_KEY)
+        return value if value in ("env", "keychain") else "env"
+
+    def set_switch_mode(self, mode: str) -> None:
+        if mode not in ("env", "keychain"):
+            raise ValueError("unknown switch mode: %r" % (mode,))
+        state = self.state()
+        if state.get(SWITCH_MODE_KEY) != mode:
+            state[SWITCH_MODE_KEY] = mode
+            self.save_state(state)
+
     # -- config -----------------------------------------------------------
 
     def config(self) -> Dict:
         raw = self._read_json(self.config_path)
         return merged_config(raw if isinstance(raw, dict) else None)
+
+    def update_config(self, updates: Dict) -> Dict:
+        """Merge `updates` into config.json (user overrides only), atomically."""
+        raw = self._read_json(self.config_path)
+        data = dict(raw) if isinstance(raw, dict) else {}
+        data.update(updates)
+        self._write_atomic(self.config_path, data)
+        return merged_config(data)
 
     # -- usage cache ------------------------------------------------------
 

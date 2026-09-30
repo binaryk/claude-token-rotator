@@ -432,6 +432,7 @@ class TestKeychain(KeychainTestCase):
             {
                 "claudeAiOauth": {
                     "accessToken": FAKE_TOKEN,
+                    "refreshToken": "sk-ant-ort01-fake-refresh",
                     "subscriptionType": "max",
                     "expiresAt": 1789476798862,  # milliseconds
                 }
@@ -449,6 +450,11 @@ class TestKeychain(KeychainTestCase):
         self.assertIsNone(keychain.claude_login_token())
         self.assertEqual(keychain.claude_login_info()["subscription"], "")
         self.install(FakeSecurity(stored={"Claude Code-credentials": "not json"}))
+        self.assertIsNone(keychain.claude_login_token())
+        # After `ctr switch` the item holds a setup-token (no refresh token):
+        # that is not "the login" and must not be re-registered as one.
+        setup = json.dumps({"claudeAiOauth": {"accessToken": FAKE_TOKEN, "refreshToken": None}})
+        self.install(FakeSecurity(stored={"Claude Code-credentials": setup}))
         self.assertIsNone(keychain.claude_login_token())
         self.assertEqual(keychain.claude_login_info()["expires_at"], 0)
 
@@ -538,3 +544,19 @@ class CacheHitIsNotAProbeTests(StoreTestCase):
         )
         self.store.cache_put(reading)
         self.assertIsNone(self.store.cache_get("social", ttl_s=60, now=1100))
+
+
+class TestUpdateConfig(StoreTestCase):
+    def test_auto_switch_defaults_to_on(self):
+        self.assertTrue(self.store.config()["auto_switch"])
+
+    def test_update_config_merges_and_keeps_other_overrides(self):
+        self.store.update_config({"switch_at_5h": 80.0})
+        merged = self.store.update_config({"auto_switch": False})
+        self.assertFalse(merged["auto_switch"])
+        self.assertEqual(80.0, self.store.config()["switch_at_5h"])
+        with open(self.store.config_path) as handle:
+            raw = json.load(handle)
+        self.assertEqual({"auto_switch": False, "switch_at_5h": 80.0}, raw)
+        self.assertEqual(0o600, stat.S_IMODE(os.stat(self.store.config_path).st_mode))
+        self.assertEqual([], self.temp_leftovers())
