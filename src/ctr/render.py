@@ -252,7 +252,10 @@ MONITOR_INSTALLED = (
 
 
 def monitor_installed(program: str, path: str, interval_s: int, log_path: str) -> None:
-    out(MONITOR_INSTALLED % (program, path, interval_s, log_path))
+    text = MONITOR_INSTALLED % (program, path, interval_s, log_path)
+    if path.endswith(".timer"):  # systemd: the unit is a timer, not a plist
+        text = text.replace("    plist    ", "    timer    ", 1)
+    out(text)
 
 
 SHELL_INSTALLED = (

@@ -1,4 +1,4 @@
-"""macOS notifications for ctr.
+"""Desktop notifications for ctr (osascript on macOS, notify-send on Linux).
 
 One public function. It must never raise: a failed notification can never be a
 reason for the monitor loop to die. Messages passed in here are already
@@ -53,9 +53,16 @@ def applescript(title: str, message: str) -> str:
 def notify(title: str, message: str) -> None:
     """Post a macOS notification. Never raises; failures go to the ctr log."""
     try:
-        status = _run(["osascript", "-e", applescript(title, message)])
+        from ctr import host
+
+        if host.is_macos():
+            cmd = ["osascript", "-e", applescript(title, message)]
+        else:
+            cmd = ["notify-send", "--app-name=ctr", _sanitize(title, MAX_TITLE),
+                   _sanitize(message, MAX_MESSAGE)]
+        status = _run(cmd)
         if status != 0:
-            _log("notification failed (osascript exit %d)" % status)
+            _log("notification failed (%s exit %d)" % (cmd[0], status))
     except Exception as exc:  # osascript missing, sandboxed, timed out...
         _log("notification failed: %s" % exc.__class__.__name__)
 

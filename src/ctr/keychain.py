@@ -27,6 +27,7 @@ import os
 import subprocess
 from typing import Dict, List, Optional, Tuple
 
+from ctr import host
 from ctr.model import CLAUDE_KEYCHAIN_SERVICE, KEYCHAIN_PREFIX
 
 SECURITY = "/usr/bin/security"
@@ -98,6 +99,8 @@ def get(service: str) -> Optional[str]:
     """Return the stored secret, or None when the item is absent or empty."""
     if not service:
         return None
+    if not host.is_macos():
+        return _linux().get(service)
     rc, out, _err = _run([SECURITY, "find-generic-password", "-s", service, "-w"])
     if rc != 0:
         return None
@@ -109,6 +112,8 @@ def exists(service: str) -> bool:
     """True when the item is present, WITHOUT retrieving its secret."""
     if not service:
         return False
+    if not host.is_macos():
+        return _linux().exists(service)
     rc, _out, _err = _run([SECURITY, "find-generic-password", "-s", service])
     return rc == 0
 
@@ -119,6 +124,13 @@ def set(service: str, account: str, secret: str) -> None:  # noqa: A001 (frozen 
         raise ValueError("service is required")
     if not secret or not secret.strip():
         raise ValueError("refusing to store an empty secret")
+    if not host.is_macos():
+        store = _linux()
+        try:
+            store.set(service, account or DEFAULT_ACCOUNT, secret)
+        except store.SecretStoreError as exc:
+            raise KeychainError(str(exc))
+        return
     cmd = [
         SECURITY,
         "add-generic-password",
@@ -162,6 +174,8 @@ def delete(service: str) -> bool:
     """
     if not service:
         return False
+    if not host.is_macos():
+        return _linux().delete(service)
     deleted = False
     for _ in range(_MAX_DUPLICATES):
         rc, _out, _err = _run([SECURITY, "delete-generic-password", "-s", service])
@@ -207,7 +221,7 @@ def token_for(label: str) -> Optional[str]:
 
 def claude_login_token() -> Optional[str]:
     """The interactive-login access token Claude Code stores for itself."""
-    blob = get(CLAUDE_KEYCHAIN_SERVICE)
+    blob = _claude_blob()
     if not blob:
         return None
     oauth = _claude_oauth_blob(blob)
@@ -228,7 +242,7 @@ def claude_login_info() -> Dict:
     pieces come back as "" / 0 rather than raising.
     """
     info = {"account": "", "subscription": "", "expires_at": 0}
-    blob = get(CLAUDE_KEYCHAIN_SERVICE)
+    blob = _claude_blob()
     if blob:
         oauth = _claude_oauth_blob(blob)
         subscription = oauth.get("subscriptionType")
@@ -239,6 +253,30 @@ def claude_login_info() -> Dict:
     if account:
         info["account"] = account
     return info
+
+
+def _linux():
+    """The Linux secret store (lazy, so macOS never imports it)."""
+    from ctr import secretstore
+
+    return secretstore
+
+
+def _claude_blob() -> Optional[str]:
+    """Claude Code's credentials document as text, or None.
+
+    macOS: the `Claude Code-credentials` keychain item. Linux: Claude Code
+    keeps the same JSON in ~/.claude/.credentials.json (measured on office).
+    """
+    if host.is_macos():
+        return get(CLAUDE_KEYCHAIN_SERVICE)
+    from ctr import claude_login
+
+    try:
+        data = claude_login.read_store()
+    except claude_login.LoginStoreError:
+        return None
+    return json.dumps(data) if data else None
 
 
 def _claude_oauth_blob(blob: str) -> Dict:

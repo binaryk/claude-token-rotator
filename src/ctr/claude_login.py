@@ -41,10 +41,13 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
+import tempfile
 import unicodedata
 from typing import Dict, Optional
 
+from ctr import host
 from ctr.model import CLAUDE_KEYCHAIN_SERVICE
 
 SECURITY = "/usr/bin/security"
@@ -59,6 +62,14 @@ BACKUP_ACCOUNT = "ctr"
 SETUP_TOKEN_SCOPES = ["user:inference"]
 
 _USER_RE = re.compile(r"^[a-zA-Z0-9._-]+$")
+
+#: Linux: Claude Code keeps the credentials document in this file inside its
+#: config dir (~/.claude, or $CLAUDE_CONFIG_DIR), mode 0600.
+CREDENTIALS_FILE = ".credentials.json"
+#: Linux: ctr's copy of a displaced /login sits next to it with this suffix.
+LOGIN_BACKUP_SUFFIX = ".ctr-login"
+#: Linux: the raw previous file, copied before every write ctr makes.
+PREVIOUS_SUFFIX = ".ctr-prev"
 
 
 class LoginStoreError(RuntimeError):
@@ -97,6 +108,8 @@ def service_name(environ: Optional[Dict[str, str]] = None) -> str:
     "-" + sha256(dir)[:8], so a separate config dir has a separate login.
     """
     env = os.environ if environ is None else environ
+    if not host.is_macos():
+        return credentials_path(env)
     secure = env.get("CLAUDE_SECURESTORAGE_CONFIG_DIR")
     if secure is not None:
         directory = secure
@@ -108,6 +121,17 @@ def service_name(environ: Optional[Dict[str, str]] = None) -> str:
         return CLAUDE_KEYCHAIN_SERVICE
     digest = hashlib.sha256(unicodedata.normalize("NFC", directory).encode("utf-8"))
     return "%s-%s" % (CLAUDE_KEYCHAIN_SERVICE, digest.hexdigest()[:8])
+
+
+def credentials_path(environ: Optional[Dict[str, str]] = None) -> str:
+    """Linux: the file Claude Code keeps its credentials in.
+
+    On Linux the "service" ctr passes around IS this absolute path, so the
+    rest of the module (backup naming, summaries) works unchanged.
+    """
+    env = os.environ if environ is None else environ
+    directory = env.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
+    return os.path.join(directory, CREDENTIALS_FILE)
 
 
 def keychain_account() -> str:
@@ -133,6 +157,8 @@ ITEM_NOT_FOUND = 44
 
 def _read_text(service: str, account: str) -> Optional[str]:
     """The item's text, None when it does not exist. Raises on any other failure."""
+    if not host.is_macos():
+        return _read_file(_linux_path(service))
     rc, out, err = _run([SECURITY, "find-generic-password", "-a", account, "-s", service, "-w"])
     if rc == ITEM_NOT_FOUND:
         return None
@@ -146,6 +172,9 @@ def _read_text(service: str, account: str) -> Optional[str]:
 
 def _write_text(service: str, account: str, text: str) -> None:
     """Upsert (service, account) with `text`. Never deletes: the ACL survives."""
+    if not host.is_macos():
+        _write_file(_linux_path(service), text)
+        return
     hexed = text.encode("utf-8").hex()
     line = 'add-generic-password -U -a "%s" -s "%s" -X "%s"\n' % (account, service, hexed)
     if len(line) <= SECURITY_I_LIMIT:
@@ -165,6 +194,54 @@ def _write_text(service: str, account: str, text: str) -> None:
         stored = None
     if stored != text:
         raise LoginStoreError("keychain write to %r could not be verified" % service)
+
+
+def _linux_path(service: str) -> str:
+    """Linux: the file behind a "service" (the credentials path or its backup)."""
+    if service.startswith(BACKUP_PREFIX):
+        return service[len(BACKUP_PREFIX):] + LOGIN_BACKUP_SUFFIX
+    return service
+
+
+def _read_file(path: str) -> Optional[str]:
+    try:
+        with open(path, "r") as handle:
+            text = handle.read()
+    except FileNotFoundError:
+        return None
+    except (IOError, OSError) as exc:
+        raise LoginStoreError(
+            "could not read %r (%s); nothing was changed" % (path, exc.strerror or "os error")
+        )
+    return text.rstrip("\r\n") or None
+
+
+def _write_file(path: str, text: str) -> None:
+    """Back up the current file, then replace it atomically at mode 0600."""
+    directory = os.path.dirname(path) or "."
+    try:
+        if not os.path.isdir(directory):
+            os.makedirs(directory, 0o700)
+        if os.path.exists(path):
+            # Created 0600 up front: copyfile alone would create it under the
+            # umask (0644) and expose the refresh token until the chmod.
+            previous = path + PREVIOUS_SUFFIX
+            os.close(os.open(previous, os.O_WRONLY | os.O_CREAT, 0o600))
+            os.chmod(previous, 0o600)
+            shutil.copyfile(path, previous)
+        handle, tmp = tempfile.mkstemp(dir=directory, prefix=".ctr-", suffix=".tmp")
+        try:
+            with os.fdopen(handle, "w") as stream:
+                os.fchmod(stream.fileno(), 0o600)
+                stream.write(text)
+            os.replace(tmp, path)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+    except (IOError, OSError) as exc:
+        raise LoginStoreError("write to %r failed (%s)" % (path, exc.strerror or "os error"))
+    if _read_file(path) != text:
+        raise LoginStoreError("write to %r could not be verified" % path)
 
 
 def _parse(text: Optional[str], what: str) -> Dict:

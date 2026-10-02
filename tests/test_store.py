@@ -19,6 +19,11 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
 from ctr import keychain, store  # noqa: E402
+from ctr import host  # noqa: E402
+
+#: These tests drive the macOS paths (fake `security`, launchd) on any OS;
+#: test_linux.py covers the Linux branches.
+host.SYSTEM = "darwin"
 from ctr.model import (  # noqa: E402
     PROBE_OAUTH_USAGE,
     PROBE_RATELIMIT_HEADERS,

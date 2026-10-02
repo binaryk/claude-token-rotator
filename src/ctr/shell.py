@@ -20,6 +20,7 @@ import shutil
 import tempfile
 from typing import Dict, List, Optional, Tuple
 
+from ctr import host
 from ctr.model import (
     ACTIVE_FILE,
     ENV_VAR,
@@ -31,6 +32,8 @@ from ctr.model import (
 
 #: Where the guarded source line goes.
 ZSHRC_PATH = "~/.zshrc"
+#: Linux: bash is the default login shell (Omarchy, Arch).
+BASHRC_PATH = "~/.bashrc"
 #: Suffix of the one-time backup taken before ctr first edits the rc file.
 BACKUP_SUFFIX = ".ctr-backup"
 
@@ -69,6 +72,31 @@ _HEADER = (
     "# ctr (claude-token-rotator) — generated file. It contains NO secret.\n"
     "# The token is read from the macOS keychain every time this file is sourced.\n"
 )
+_HEADER_LINUX = (
+    "# ctr (claude-token-rotator) — generated file. It contains NO secret.\n"
+    "# The token is read from the Secret Service every time this file is sourced.\n"
+)
+
+
+def rc_targets(environ: Optional[Dict[str, str]] = None) -> List[str]:
+    """The rc files ctr installs its block into.
+
+    macOS: ~/.zshrc. Linux: ~/.bashrc, plus ~/.zshrc when $SHELL is zsh.
+    """
+    if host.is_macos():
+        return [ZSHRC_PATH]
+    env = os.environ if environ is None else environ
+    targets = [BASHRC_PATH]
+    if os.path.basename(env.get("SHELL") or "") == "zsh":
+        targets.append(ZSHRC_PATH)
+    return targets
+
+
+def _token_read(service: str) -> str:
+    """Shell command that prints the token for `service`, silent on a miss."""
+    if host.is_macos():
+        return "security find-generic-password -s '%s' -w 2>/dev/null || true" % service
+    return "secret-tool lookup service '%s' 2>/dev/null || true" % service
 
 
 # ---------------------------------------------------------------------------
@@ -119,12 +147,11 @@ def active_sh_contents(label: Optional[str], mode: str = MODE_ENV) -> str:
         raise ValueError("invalid token label: %r" % (label,))
     service = KEYCHAIN_PREFIX + label
     return (
-        _HEADER
+        (_HEADER if host.is_macos() else _HEADER_LINUX)
         + "# Regenerate with: ctr use <label>\n"
         + "CTR_ACTIVE_LABEL='%s'\n" % label
         + "export CTR_ACTIVE_LABEL\n"
-        + "_ctr_tok=\"$(security find-generic-password -s '%s' -w 2>/dev/null || true)\"\n"
-        % service
+        + "_ctr_tok=\"$(%s)\"\n" % _token_read(service)
         + 'if [ -n "$_ctr_tok" ]; then\n'
         + '  %s="$_ctr_tok"\n' % ENV_VAR
         + "  export %s\n" % ENV_VAR
@@ -359,6 +386,8 @@ def status(
 
 __all__ = [
     "ZSHRC_PATH",
+    "BASHRC_PATH",
+    "rc_targets",
     "CONFLICTING_ENV_VARS",
     "BACKUP_SUFFIX",
     "active_sh_contents",

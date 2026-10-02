@@ -96,6 +96,25 @@ def _program_path() -> str:
     return os.path.realpath(sys.argv[0] or "ctr")
 
 
+def _monitor_backend():
+    """launchd on macOS, a systemd user timer everywhere else."""
+    from ctr import host
+
+    if host.is_macos():
+        from ctr import launchd
+
+        return launchd
+    from ctr import systemd
+
+    return systemd
+
+
+def _rc_files(args) -> List[str]:
+    """The rc file(s) install-shell manages: --rc-file, else the platform's."""
+    explicit = getattr(args, "rc_file", None)
+    return [explicit] if explicit else shell.rc_targets()
+
+
 def _kind_of(token: str) -> str:
     return "oat" if token.startswith("sk-ant-oat") else "oauth"
 
@@ -452,18 +471,14 @@ def cmd_monitor(args) -> int:
 
 
 def cmd_install_monitor(args) -> int:
-    from ctr import launchd
-
     program = _program_path()
-    path = launchd.install(program, interval_s=args.interval)
+    path = _monitor_backend().install(program, interval_s=args.interval)
     render.monitor_installed(program, path, args.interval, os.path.expanduser(LOG_FILE))
     return 0
 
 
 def cmd_uninstall_monitor(args) -> int:
-    from ctr import launchd
-
-    if launchd.uninstall():
+    if _monitor_backend().uninstall():
         _out("Monitor agent removed.")
     else:
         _out("No monitor agent was installed.")
@@ -492,8 +507,8 @@ def cmd_install_shell(args) -> int:
         os.makedirs(directory, 0o700)
     os.chmod(directory, 0o700)
     active = shell.write_active(store.active(), _active_path(args), store.switch_mode())
-    rc_file = shell.install_zshrc(getattr(args, "rc_file", None), _active_path(args))
-    render.shell_installed(rc_file, active)
+    rc_files = [shell.install_zshrc(rc, _active_path(args)) for rc in _rc_files(args)]
+    render.shell_installed(", ".join(rc_files), active)
     return 0
 
 
@@ -543,17 +558,31 @@ def _doctor_paths(args, store) -> List:
     elif os.path.dirname(link) not in path_dirs:
         out.append(("fail", "ctr on PATH", "%s exists but its directory is not in $PATH" % BIN_LINK))
     else:
-        out.append(("ok", "ctr on PATH", link))
+        out.append(_doctor_shadowed(link))
     return out
 
 
+def _doctor_shadowed(link: str):
+    """`ctr` must resolve to ctr. containerd ships /usr/bin/ctr (Arch, measured on
+    office): with /usr/bin ahead of ~/.local/bin every `ctr` command ran containerd."""
+    import shutil
+
+    found = shutil.which("ctr")
+    if found and os.path.realpath(found) != os.path.realpath(link):
+        return ("fail", "ctr on PATH", "`ctr` resolves to %s, not ctr — put %s first in "
+                "$PATH (or use claude-rotator)" % (found, os.path.dirname(link)))
+    return ("ok", "ctr on PATH", link)
+
+
 def _doctor_shell(args, store) -> List:
-    info = shell.status(getattr(args, "rc_file", None), _active_path(args))
     out = []
-    if info["rc_installed"]:
-        out.append(("ok", "zshrc block", info["rc_path"]))
-    else:
-        out.append(("fail", "zshrc block", "not in %s — run: ctr install-shell" % info["rc_path"]))
+    for rc in _rc_files(args):
+        info = shell.status(rc, _active_path(args))
+        name = "%s block" % os.path.basename(info["rc_path"]).lstrip(".")
+        if info["rc_installed"]:
+            out.append(("ok", name, info["rc_path"]))
+        else:
+            out.append(("fail", name, "not in %s — run: ctr install-shell" % info["rc_path"]))
 
     if not info["active_exists"]:
         out.append(("fail", "active.sh", "%s is missing — run: ctr install-shell" % info["active_path"]))
@@ -601,14 +630,17 @@ def _doctor_env() -> List:
 
 
 def _doctor_launchd() -> List:
-    from ctr import launchd
-
-    info = launchd.status()
+    info = _monitor_backend().status()
     if not info.get("installed"):
         return [("warn", "monitor agent", "not installed — run: ctr install-monitor")]
     if not info.get("loaded"):
-        return [("fail", "monitor agent", "plist present but not loaded — re-run: ctr install-monitor")]
-    return [("ok", "monitor agent", str(info.get("plist") or ""))]
+        what = "plist" if "plist" in info else "unit"
+        return [("fail", "monitor agent", "%s present but not loaded — re-run: ctr install-monitor" % what)]
+    rows = [("ok", "monitor agent", str(info.get("plist") or info.get("path") or ""))]
+    if info.get("linger") is False:
+        rows.append(("warn", "linger", "off — the timer stops at your last logout; "
+                     "run: loginctl enable-linger $USER"))
+    return rows
 
 
 #: `usage._request` makes one 0600 work directory per probe and removes it in a
@@ -745,7 +777,7 @@ def _register_service_commands(subparsers) -> None:
     monitor.set_defaults(handler=cmd_monitor)
 
     install_monitor = subparsers.add_parser(
-        "install-monitor", help="install the launchd agent"
+        "install-monitor", help="install the monitor (launchd agent / systemd user timer)"
     )
     install_monitor.add_argument(
         "--interval", type=int, default=300, help="seconds between passes"
@@ -753,12 +785,12 @@ def _register_service_commands(subparsers) -> None:
     install_monitor.set_defaults(handler=cmd_install_monitor)
 
     uninstall_monitor = subparsers.add_parser(
-        "uninstall-monitor", help="remove the launchd agent"
+        "uninstall-monitor", help="remove the monitor"
     )
     uninstall_monitor.set_defaults(handler=cmd_uninstall_monitor)
 
     install_shell = subparsers.add_parser(
-        "install-shell", help="install the ~/.zshrc block"
+        "install-shell", help="install the shell rc block (~/.zshrc; ~/.bashrc on Linux)"
     )
     install_shell.set_defaults(handler=cmd_install_shell)
 

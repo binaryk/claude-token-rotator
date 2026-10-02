@@ -24,6 +24,11 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
 from ctr import keychain  # noqa: E402
+from ctr import host  # noqa: E402
+
+#: These tests drive the macOS paths (fake `security`, launchd) on any OS;
+#: test_linux.py covers the Linux branches.
+host.SYSTEM = "darwin"
 
 PROBE_SERVICE = "ctr:__pytest_tty_probe__"
 PROBE_SECRET = "sk-ant-oat01-TTYPROBE-do-not-use-0123456789"
@@ -69,6 +74,7 @@ def _write_under_a_tty():
     return None
 
 
+@unittest.skipUnless(sys.platform == "darwin", "drives the real /usr/bin/security")
 class KeychainWriteUnderATtyTests(unittest.TestCase):
     """Guards the 2026-09-16 defect: `ctr add` was broken in every real shell."""
 

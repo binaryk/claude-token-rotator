@@ -4,6 +4,7 @@ Python 3.8 compatible (the Mac's python3 is 3.8.0). No third-party imports.
 Nothing in this module performs I/O.
 """
 
+import sys
 import time
 from typing import Dict, List, NamedTuple, Optional
 
@@ -16,7 +17,9 @@ TOKENS_FILE = "~/.config/ctr/tokens.json"
 STATE_FILE = "~/.config/ctr/state.json"
 ACTIVE_FILE = "~/.config/ctr/active.sh"
 CONFIG_FILE = "~/.config/ctr/config.json"
-LOG_FILE = "~/Library/Logs/ctr.log"
+LOG_FILE = (
+    "~/Library/Logs/ctr.log" if sys.platform == "darwin" else "~/.local/state/ctr/ctr.log"
+)
 LAUNCHD_LABEL = "com.binarcode.ctr-monitor"
 LAUNCHD_PLIST = "~/Library/LaunchAgents/com.binarcode.ctr-monitor.plist"
 
@@ -274,13 +277,17 @@ def pct(value: Optional[float]) -> str:
 
 
 def fmt_reset(epoch: Optional[int], now: Optional[int] = None) -> str:
-    """Human 'in 2h14m' style for a reset timestamp."""
+    """Human countdown to a reset: 'in 3d17h' from a day out, 'in 2h14m'
+    under a day, 'in 14m' under an hour."""
     if not epoch:
         return "-"
     now = int(time.time()) if now is None else now
     delta = epoch - now
     if delta <= 0:
         return "now"
+    days, rem = divmod(delta, 86400)
+    if days:
+        return "in %dd%02dh" % (days, rem // 3600)
     hours, rem = divmod(delta, 3600)
     minutes = rem // 60
     if hours:

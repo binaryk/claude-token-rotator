@@ -22,6 +22,11 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
 from ctr import launchd, monitor, notify, selector  # noqa: E402
+from ctr import host  # noqa: E402
+
+#: These tests drive the macOS paths (fake `security`, launchd) on any OS;
+#: test_linux.py covers the Linux branches.
+host.SYSTEM = "darwin"
 from ctr.model import (  # noqa: E402
     FAILURE_HTTP,
     FAILURE_TRANSPORT,

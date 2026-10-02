@@ -15,6 +15,11 @@ import tempfile
 import unittest
 
 from ctr import shell
+from ctr import host  # noqa: E402
+
+#: These tests drive the macOS paths (fake `security`, launchd) on any OS;
+#: test_linux.py covers the Linux branches.
+host.SYSTEM = "darwin"
 from ctr.model import ENV_VAR, ZSHRC_BEGIN, ZSHRC_END
 
 # Anything that looks like a real credential must never appear in a generated
@@ -317,7 +322,9 @@ class ZshrcTests(unittest.TestCase):
         script = os.path.join(self.tmp, "active_warn.sh")
         with open(script, "w") as stream:
             stream.write(body)
-        for shell_bin in ("sh", "zsh"):
+        for shell_bin in ("sh", "bash", "zsh"):
+            if not shutil.which(shell_bin):
+                continue  # e.g. no zsh on a stock Arch box
             proc = subprocess.run([shell_bin, "-n", script], stderr=subprocess.PIPE)
             self.assertEqual(0, proc.returncode,
                              "%s: %s" % (shell_bin, proc.stderr.decode()))

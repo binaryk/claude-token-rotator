@@ -361,6 +361,16 @@ class TestProbeStrategies(ProbeTestCase):
         self.assertEqual(result.five_h, 51.0)
         self.assertEqual(fake.urls(), [usage.OAUTH_USAGE_URL, usage.MESSAGES_URL])
 
+    def test_oauth_429_falls_back_to_the_header_probe(self):
+        fake = self.install(
+            Response(429, '{"type":"error","error":{"type":"rate_limit_error"}}'),
+            Response(200, "{}", headers=fixture("ratelimit_headers_allowed.txt")),
+        )
+        result = usage.probe("social", FAKE_TOKEN)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.probe, PROBE_RATELIMIT_HEADERS)
+        self.assertEqual(fake.urls(), [usage.OAUTH_USAGE_URL, usage.MESSAGES_URL])
+
     def test_oauth_success_does_not_make_a_second_call(self):
         fake = self.install(Response(200, fixture("oauth_usage_200.json")))
         result = usage.probe("social", FAKE_TOKEN)
@@ -538,10 +548,21 @@ class TestProbeReportsTheMostInformativeError(ProbeTestCase):
         self.assertEqual(result.error, "")
 
     def test_a_lone_failure_is_reported_verbatim(self):
-        self.install(Response(429, fixture("oauth_usage_429.json")))
+        # 401 does not fall back (a 429 on the usage endpoint does since
+        # 2026-10-01), so it is the one-attempt case.
+        self.install(Response(401, '{"type":"error","error":{"type":"authentication_error"}}'))
         result = usage.probe("social", FAKE_TOKEN)
-        self.assertIn("transient", result.error)
+        self.assertIn("revoked", result.error)
         self.assertNotIn("[also:", result.error)
+
+    def test_a_429_on_both_endpoints_stays_transient(self):
+        self.install(
+            Response(429, fixture("oauth_usage_429.json")),
+            Response(429, '{"type":"error","error":{"type":"rate_limit_error"}}'),
+        )
+        result = usage.probe("social", FAKE_TOKEN)
+        self.assertFalse(result.ok)
+        self.assertIn("transient", result.error)
 
 
 # ---------------------------------------------------------------------------

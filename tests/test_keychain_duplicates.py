@@ -23,6 +23,11 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
 from ctr import keychain  # noqa: E402
+from ctr import host  # noqa: E402
+
+#: These tests drive the macOS paths (fake `security`, launchd) on any OS;
+#: test_linux.py covers the Linux branches.
+host.SYSTEM = "darwin"
 
 REAL = "sk-ant-oat01-REALTOKEN-do-not-use-0123456789abcdefghij"
 SERVICE = "ctr:work"

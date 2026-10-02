@@ -103,7 +103,10 @@ _FALLBACK_FROM = {
     # A transport error on one endpoint may still succeed on the other (a
     # single connection reset, a half-open socket), so it is worth the second
     # attempt — the fleet-moving decision is what must ignore it, not the probe.
-    PROBE_OAUTH_USAGE: ("scope_insufficient", OUTCOME_TRANSPORT),
+    # /api/oauth/usage also answers 429 (not 403) to a setup-token on a fresh
+    # host (measured on brian 2026-10-01), so a 429 there must fall through to
+    # the header probe instead of leaving the token unread.
+    PROBE_OAUTH_USAGE: ("scope_insufficient", "rate_limited", OUTCOME_TRANSPORT),
     PROBE_RATELIMIT_HEADERS: ("no_headers", "http_error", OUTCOME_TRANSPORT),
 }
 _ERROR_TEXT = {

@@ -13,12 +13,18 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "src"))
 sys.path.insert(0, HERE)
 
 from ctr import claude_login, cli, fable, keychain, sessions, shell, switcher  # noqa: E402
+from ctr import host  # noqa: E402
+
+#: These tests drive the macOS paths (fake `security`, launchd) on any OS;
+#: test_linux.py covers the Linux branches.
+host.SYSTEM = "darwin"
 from ctr import usage as usage_module  # noqa: E402
 from ctr.model import TokenRecord, Usage  # noqa: E402
 from ctr.store import Store  # noqa: E402
@@ -203,7 +209,11 @@ class TestCtrSwitch(SwitchTestCase):
         from ctr import monitor
         self.ctr("switch", "spare")
         state = self.store.state()
-        self.assertTrue(monitor._apply_switch(self.store, state, "spare", "social", 100))
+        # _apply_switch writes the DEFAULT active.sh (right in production): aim
+        # it at the test file, or the suite rewrites the real ~/.config/ctr one.
+        with mock.patch.object(monitor, "LOG_FILE", os.path.join(self.tmp, "ctr.log")), \
+                mock.patch.object(shell, "ACTIVE_FILE", self.active):
+            self.assertTrue(monitor._apply_switch(self.store, state, "spare", "social", 100))
         self.assertEqual(self.claude_doc()["claudeAiOauth"]["accessToken"], TOKENS["social"])
 
 

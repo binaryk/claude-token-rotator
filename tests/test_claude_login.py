@@ -18,6 +18,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(HERE), "src"))
 sys.path.insert(0, HERE)
 
 from ctr import claude_login as cl  # noqa: E402
+from ctr import host  # noqa: E402
+
+#: These tests drive the macOS paths (fake `security`, launchd) on any OS;
+#: test_linux.py covers the Linux branches.
+host.SYSTEM = "darwin"
 from fake_security import FakeSecurity  # noqa: E402
 
 SOCIAL = "sk-ant-oat01-SOCIALSOCIAL-0123456789abcdefghij"

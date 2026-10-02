@@ -10,9 +10,9 @@ another, and the Claude windows you already have open keep working.
 - **Shows** how much each account has used, and when it resets.
 - **Switches** accounts with one command. Open Claude windows switch too.
 - **Watches** in the background and switches for you before an account runs out.
-- **Keeps your keys safe** in the Mac keychain.
+- **Keeps your keys safe** in the Mac keychain (on Linux: the system keyring).
 
-Works on a Mac.
+Works on a Mac and on Linux (tested on Arch / Omarchy).
 
 ## Install it with Claude
 
@@ -67,6 +67,26 @@ ctr add work           # paste it
 - A Claude window started with `CLAUDE_CODE_OAUTH_TOKEN` set will not switch.
   Close it and open it again.
 - Want the details? Read [HOW-IT-WORKS.md](HOW-IT-WORKS.md).
+
+## On Linux
+
+The same commands work. What is different underneath:
+
+- Keys go to the system keyring through `secret-tool` (libsecret). The keyring
+  must be unlocked for your ssh logins and for systemd user services. Check with
+  `printf x | secret-tool store --label=t t t && secret-tool lookup t t && secret-tool clear t t`.
+- `ctr switch` writes Claude's own login file, `~/.claude/.credentials.json`.
+  It keeps a copy of the file it replaced next to it (`.ctr-prev`), and your
+  normal login in `.ctr-login`. Open Claude windows follow a switch, as on a Mac.
+- `ctr install-monitor` installs a systemd user timer (`ctr-monitor.timer`,
+  every 5 minutes). To keep it running after you log out:
+  `loginctl enable-linger $USER`. Logs: `journalctl --user -u ctr-monitor`
+  and `~/.local/state/ctr/ctr.log`.
+- `install.sh` adds its line to `~/.bashrc` (and `~/.zshrc` if your shell is zsh).
+- Arch's `containerd` package also installs a `/usr/bin/ctr`. Put
+  `~/.local/bin` first in your `PATH`, or call `claude-rotator` instead.
+  `ctr doctor` tells you which one you are running.
+- For `ctr ui`: `sudo pacman -S python-textual python-rich` (Arch blocks `pip install --user`).
 
 ## License
 

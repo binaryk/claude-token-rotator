@@ -19,7 +19,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
 from ctr import render  # noqa: E402
-from ctr.model import Decision, TokenRecord, Usage, merged_config  # noqa: E402
+from ctr.model import Decision, TokenRecord, Usage, fmt_reset, merged_config  # noqa: E402
 
 NOW = 1789480000
 
@@ -181,6 +181,39 @@ class TestRenderNotices(unittest.TestCase):
         self.assertIn("5 stale", detail)
         self.assertIn("...", detail)
         self.assertNotIn("ctr-probe-4", detail)
+
+
+class TestFmtReset(unittest.TestCase):
+    """One countdown rule for the table, `ctr status --pretty` and the TUI."""
+
+    def test_missing_or_past_resets(self):
+        self.assertEqual("-", fmt_reset(None, NOW))
+        self.assertEqual("now", fmt_reset(NOW, NOW))
+        self.assertEqual("now", fmt_reset(NOW - 60, NOW))
+
+    def test_under_an_hour_shows_minutes(self):
+        self.assertEqual("in 0m", fmt_reset(NOW + 59, NOW))
+        self.assertEqual("in 59m", fmt_reset(NOW + 3599, NOW))
+
+    def test_under_a_day_shows_hours_and_minutes(self):
+        self.assertEqual("in 1h00m", fmt_reset(NOW + 3600, NOW))
+        self.assertEqual("in 2h04m", fmt_reset(NOW + 2 * 3600 + 4 * 60, NOW))
+        self.assertEqual("in 23h59m", fmt_reset(NOW + 86399, NOW))
+
+    def test_a_day_or_more_shows_days_and_hours(self):
+        self.assertEqual("in 1d00h", fmt_reset(NOW + 86400, NOW))
+        self.assertEqual("in 3d17h", fmt_reset(NOW + 89 * 3600 + 4 * 60, NOW))
+        self.assertEqual("in 6d22h", fmt_reset(NOW + 166 * 3600 + 4 * 60, NOW))
+
+    def test_a_full_seven_day_window_stays_narrow(self):
+        text = fmt_reset(NOW + 7 * 86400, NOW)
+        self.assertEqual("in 7d00h", text)
+        self.assertLessEqual(len(text), len("in 23h59m"))
+
+    def test_status_table_prints_days_for_the_7d_window(self):
+        reading = usage("work")._replace(seven_d_reset=NOW + 89 * 3600 + 4 * 60)
+        rows = render.token_rows([record("work")], [reading], "work", NOW)
+        self.assertIn("in 3d17h", rows[0])
 
 
 class TestRenderStatus(unittest.TestCase):

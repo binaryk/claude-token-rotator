@@ -4,7 +4,8 @@
 #   ./install.sh
 #
 # It symlinks ~/.local/bin/ctr to this checkout, creates ~/.config/ctr (0700),
-# and installs the guarded ~/.zshrc block. The launchd monitor is a separate,
+# and installs the guarded shell rc block (~/.zshrc; ~/.bashrc on Linux). The
+# monitor (launchd on macOS, a systemd user timer on Linux) is a separate,
 # explicit step: `ctr install-monitor`.
 set -eu
 
@@ -43,7 +44,7 @@ case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
   *)
     echo "  1. Put ~/.local/bin on your PATH (it is not there yet):"
-    echo "       echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.zshrc"
+    echo "       echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.zshrc   # ~/.bashrc for bash"
     ;;
 esac
 echo "  2. Register a token:        ctr add work        # prompts, no echo"
@@ -51,5 +52,5 @@ echo "  3. Check it:                ctr status"
 echo "  4. Verify the install:      ctr doctor"
 echo
 echo "The background monitor is NOT installed. Turn it on when you want it:"
-echo "       ctr install-monitor     # launchd, every 5 min"
+echo "       ctr install-monitor     # launchd / systemd user timer, every 5 min"
 echo "       ctr uninstall-monitor   # remove it again"

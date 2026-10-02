@@ -30,11 +30,22 @@ class Session(NamedTuple):
     label: str
 
 
+def ps_command() -> List[str]:
+    """`ps` listing every process WITH its environment. BSD and procps differ:
+    `-axEww` exits 1 on Linux ("unsupported SysV option"), which made every
+    session read as absent there; procps spells it `axeww`."""
+    from ctr import host
+
+    if host.is_macos():
+        return ["/bin/ps", "-axEww", "-o", "pid=,ppid=,command="]
+    return ["ps", "axeww", "-o", "pid=,ppid=,command="]
+
+
 def _ps() -> str:
     """The single subprocess seam — tests replace this."""
     try:
         proc = subprocess.run(
-            ["/bin/ps", "-axEww", "-o", "pid=,ppid=,command="],
+            ps_command(),
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             universal_newlines=True,
